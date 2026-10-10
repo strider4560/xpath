@@ -1,0 +1,39 @@
+{
+  "format_version": 1,
+  "compiler": "libyang 2.1.148",
+  "modules": [
+    {"name":"demo-augment","namespace":"urn:demo:augment","prefix":"aug","revision":"2026-10-10","enabled_features":[]},
+    {"name":"demo-if","namespace":"urn:demo:if","prefix":"if","revision":"2026-10-10","enabled_features":[]}
+  ],
+  "nodes": [
+    {"id":0,"parent":null,"kind":"root","module":"","namespace":"","name":"","config":null,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":null,"when":[],"must":[]},
+    {"id":1,"parent":0,"kind":"leaf","module":"demo-augment","namespace":"urn:demo:augment","name":"source","config":false,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":"string","when":[],"must":[]},
+    {"id":2,"parent":0,"kind":"container","module":"demo-if","namespace":"urn:demo:if","name":"interfaces","config":true,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":null,"when":[],"must":[]},
+    {"id":3,"parent":2,"kind":"list","module":"demo-if","namespace":"urn:demo:if","name":"interface","config":true,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":null,"when":[],"must":["not(enabled = 'true') or mtu >= 576"]},
+    {"id":4,"parent":3,"kind":"leaf","module":"demo-if","namespace":"urn:demo:if","name":"name","config":true,"key":true,"mandatory":true,"presence":false,"status":"current","type_name":"string","when":[],"must":[]},
+    {"id":5,"parent":3,"kind":"leaf","module":"demo-if","namespace":"urn:demo:if","name":"enabled","config":true,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":"boolean","when":[],"must":[]},
+    {"id":6,"parent":3,"kind":"leaf","module":"demo-if","namespace":"urn:demo:if","name":"description","config":true,"key":false,"mandatory":false,"presence":false,"status":"deprecated","type_name":"string","when":[],"must":["not(contains(., '\"'))\n\tor string-length(.) <= 80"]},
+    {"id":7,"parent":3,"kind":"leaf","module":"demo-if","namespace":"urn:demo:if","name":"mtu","config":true,"key":false,"mandatory":true,"presence":false,"status":"current","type_name":"uint16","when":[],"must":[]},
+    {"id":8,"parent":3,"kind":"leaf","module":"demo-if","namespace":"urn:demo:if","name":"peer","config":true,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":"leafref","when":[],"must":[]},
+    {"id":9,"parent":3,"kind":"leaf-list","module":"demo-if","namespace":"urn:demo:if","name":"aliases","config":true,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":"string","when":[],"must":[]},
+    {"id":10,"parent":3,"kind":"choice","module":"demo-if","namespace":"urn:demo:if","name":"addressing","config":true,"key":false,"mandatory":true,"presence":false,"status":"current","type_name":null,"when":[],"must":[]},
+    {"id":11,"parent":10,"kind":"case","module":"demo-if","namespace":"urn:demo:if","name":"static","config":true,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":null,"when":[],"must":[]},
+    {"id":12,"parent":11,"kind":"leaf","module":"demo-if","namespace":"urn:demo:if","name":"static-address","config":true,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":"string","when":[],"must":[]},
+    {"id":13,"parent":11,"kind":"leaf","module":"demo-if","namespace":"urn:demo:if","name":"static-prefix","config":true,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":"uint8","when":[],"must":[]},
+    {"id":14,"parent":10,"kind":"case","module":"demo-if","namespace":"urn:demo:if","name":"dynamic","config":true,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":null,"when":[],"must":[]},
+    {"id":15,"parent":14,"kind":"leaf","module":"demo-if","namespace":"urn:demo:if","name":"dhcp","config":true,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":"boolean","when":[],"must":[]},
+    {"id":16,"parent":3,"kind":"leaf","module":"demo-if","namespace":"urn:demo:if","name":"enabled-label","config":true,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":"string","when":["../enabled = 'true'"],"must":[]},
+    {"id":17,"parent":3,"kind":"leaf","module":"demo-if","namespace":"urn:demo:if","name":"legacy-name","config":true,"key":false,"mandatory":false,"presence":false,"status":"obsolete","type_name":"string","when":[],"must":[]},
+    {"id":18,"parent":3,"kind":"container","module":"demo-if","namespace":"urn:demo:if","name":"state","config":false,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":null,"when":[],"must":[]},
+    {"id":19,"parent":18,"kind":"leaf","module":"demo-if","namespace":"urn:demo:if","name":"oper-status","config":false,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":"enumeration","when":[],"must":[]},
+    {"id":20,"parent":18,"kind":"container","module":"demo-if","namespace":"urn:demo:if","name":"counters","config":false,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":null,"when":[],"must":[]},
+    {"id":21,"parent":20,"kind":"leaf","module":"demo-if","namespace":"urn:demo:if","name":"packets","config":false,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":"uint64","when":[],"must":[]},
+    {"id":22,"parent":3,"kind":"leaf","module":"demo-augment","namespace":"urn:demo:augment","name":"tag","config":true,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":"string","when":["if:enabled = 'true'"],"must":[]},
+    {"id":23,"parent":3,"kind":"container","module":"demo-augment","namespace":"urn:demo:augment","name":"telemetry","config":true,"key":false,"mandatory":false,"presence":true,"status":"current","type_name":null,"when":["if:enabled = 'true'"],"must":[]},
+    {"id":24,"parent":23,"kind":"leaf","module":"demo-augment","namespace":"urn:demo:augment","name":"sample-interval","config":true,"key":false,"mandatory":true,"presence":false,"status":"current","type_name":"uint32","when":[],"must":[]},
+    {"id":25,"parent":23,"kind":"leaf","module":"demo-augment","namespace":"urn:demo:augment","name":"temperature","config":false,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":"decimal64","when":[],"must":[". >= -40"]},
+    {"id":26,"parent":0,"kind":"container","module":"demo-if","namespace":"urn:demo:if","name":"inventory","config":true,"key":false,"mandatory":false,"presence":true,"status":"current","type_name":null,"when":[],"must":[]},
+    {"id":27,"parent":26,"kind":"anydata","module":"demo-if","namespace":"urn:demo:if","name":"payload","config":true,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":null,"when":[],"must":[]},
+    {"id":28,"parent":26,"kind":"anyxml","module":"demo-if","namespace":"urn:demo:if","name":"legacy-payload","config":true,"key":false,"mandatory":false,"presence":false,"status":"current","type_name":null,"when":[],"must":[]}
+  ]
+}

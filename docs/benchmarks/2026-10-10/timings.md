@@ -1,0 +1,37 @@
+| Workload | Before (µs) | After (µs) | Speedup |
+|---|---:|---:|---:|
+| comparison/disjoint/128 | 538.807 | 34.861 | 15.46× |
+| comparison/disjoint/16 | 13.187 | 4.742 | 2.78× |
+| comparison/disjoint/512 | 8459.626 | 137.920 | 61.34× |
+| comparison/late_match/128 | 539.844 | 35.042 | 15.41× |
+| comparison/late_match/16 | 13.239 | 4.662 | 2.84× |
+| comparison/late_match/512 | 8539.917 | 137.291 | 62.20× |
+| comparison/uniform_ne/128 | 560.273 | 24.698 | 22.68× |
+| comparison/uniform_ne/16 | 13.394 | 3.671 | 3.65× |
+| comparison/uniform_ne/512 | 8624.549 | 97.504 | 88.45× |
+| compile/axes | 1.813 | 1.673 | 1.08× |
+| compile/selector | 1.232 | 1.200 | 1.03× |
+| compile/when | 1.378 | 1.305 | 1.06× |
+| data/all/10 | 1.142 | 0.587 | 1.95× |
+| data/all/100 | 6.849 | 3.485 | 1.97× |
+| data/all/1000 | 61.957 | 32.902 | 1.88× |
+| data/descendants/10 | 5.340 | 3.870 | 1.38× |
+| data/descendants/100 | 43.809 | 33.032 | 1.33× |
+| data/descendants/1000 | 418.850 | 302.672 | 1.38× |
+| data/key/10 | 5.957 | 4.537 | 1.31× |
+| data/key/100 | 54.465 | 42.956 | 1.27× |
+| data/key/1000 | 539.429 | 416.930 | 1.29× |
+| data/reverse/10 | 1.993 | 1.423 | 1.40× |
+| data/reverse/100 | 12.096 | 10.428 | 1.16× |
+| data/reverse/1000 | 108.118 | 97.998 | 1.10× |
+| data/union/10 | 7.055 | 4.481 | 1.57× |
+| data/union/100 | 52.054 | 36.724 | 1.42× |
+| data/union/1000 | 486.948 | 337.897 | 1.44× |
+| scalar/cached | 0.193 | 0.192 | 1.01× |
+| schema/select_declaration | 0.400 | 0.237 | 1.69× |
+| when/1000_contexts | 718.233 | 473.438 | 1.52× |
+| when/false | 0.458 | 0.310 | 1.48× |
+| when/true | 0.956 | 0.627 | 1.53× |
+| xml/key/1000 | 681.627 | 580.979 | 1.17× |
+| xml/parse/1000 | 2986.753 | 2944.795 | 1.01× |
+| xml/when | 1.108 | 0.750 | 1.48× |

@@ -1,0 +1,240 @@
+diff --git a/src/eval.rs b/src/eval.rs
+index 26d780d..0cd3014 100644
+--- a/src/eval.rs
++++ b/src/eval.rs
+@@ -5,7 +5,7 @@ use crate::{
+     Axis, Context, Error, ErrorKind, ExpandedName, FunctionContext, Navigator, NodeKind, Result,
+     Value,
+ };
+-use std::{cmp::Ordering, collections::HashSet};
++use std::collections::HashSet;
+ 
+ struct Focus<N> {
+     node: N,
+@@ -13,27 +13,6 @@ struct Focus<N> {
+     size: usize,
+ }
+ 
+-// Keep the original position/size for a predicate while compacting in place.
+-// Only already-visited slots are swapped; the remaining focus order is intact.
+-// If navigation fails, the partially compacted private buffer is discarded.
+-fn retain_nodes<T>(
+-    nodes: &mut Vec<T>,
+-    mut keep: impl FnMut(&T, usize, usize) -> Result<bool>,
+-) -> Result<()> {
+-    let size = nodes.len();
+-    let mut retained = 0;
+-    for index in 0..size {
+-        if keep(&nodes[index], index + 1, size)? {
+-            if retained != index {
+-                nodes.swap(retained, index);
+-            }
+-            retained += 1;
+-        }
+-    }
+-    nodes.truncate(retained);
+-    Ok(())
+-}
+-
+ pub(crate) fn evaluate<N: Navigator>(expr: &Expr, ctx: &Context<'_, N>) -> Result<Value<N::Node>> {
+     ctx.navigator.validate_node(&ctx.node)?;
+     let mut evaluator = Evaluator {
+@@ -66,13 +45,9 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
+     }
+ 
+     fn normalize(&self, mut nodes: Vec<N::Node>) -> Vec<N::Node> {
+-        // The navigator promises a total order consistent with node identity.
+-        // Sorting groups duplicate handles without hashing/cloning each one or
+-        // allocating a second collection. Empty/singleton sets need no work.
+-        if nodes.len() > 1 {
+-            nodes.sort_unstable_by(|a, b| self.ctx.navigator.compare_document_order(a, b));
+-            nodes.dedup();
+-        }
++        let mut seen = HashSet::with_capacity(nodes.len());
++        nodes.retain(|node| seen.insert(node.clone()));
++        nodes.sort_by(|a, b| self.ctx.navigator.compare_document_order(a, b));
+         nodes
+     }
+ 
+@@ -117,9 +92,6 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
+         focus: &Focus<N::Node>,
+         depth: usize,
+     ) -> Result<Value<N::Node>> {
+-        // Invariant: every node-set leaving this function is distinct and in
+-        // document order. Caller-supplied variables/functions are canonicalized
+-        // at entry; step, union and filter preserve the invariant internally.
+         self.spend(1)?;
+         if depth >= self.ctx.limits.max_depth {
+             return Err(Error::new(
+@@ -198,7 +170,7 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
+                 steps,
+             } => {
+                 let mut nodes = if let Some(base) = base {
+-                    self.expr(base, focus, depth + 1)?.into_nodes()?
++                    self.expr(base, focus, depth + 1)?.as_nodes()?.to_vec()
+                 } else if *absolute {
+                     vec![self.root(&focus.node)?]
+                 } else {
+@@ -207,10 +179,11 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
+                 for step in steps {
+                     nodes = self.step(nodes, step, depth + 1)?;
+                 }
+-                Ok(Value::Nodes(nodes))
++                Ok(Value::Nodes(self.normalize(nodes)))
+             }
+             Expr::Filter { base, predicates } => {
+-                let nodes = self.expr(base, focus, depth + 1)?.into_nodes()?;
++                let nodes = self.expr(base, focus, depth + 1)?.as_nodes()?.to_vec();
++                let nodes = self.normalize(nodes);
+                 Ok(Value::Nodes(self.filter(nodes, predicates, depth + 1)?))
+             }
+         }
+@@ -228,28 +201,10 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
+             Or => Ok(Value::Boolean(a.to_boolean() || b.to_boolean())),
+             And => Ok(Value::Boolean(a.to_boolean() && b.to_boolean())),
+             Union => {
+-                let left = a.into_nodes()?;
+-                let right = b.into_nodes()?;
+-                self.spend(left.len() + right.len())?;
+-                // Both operands are already canonical. Merge them in linear
+-                // time; sorting their concatenation repeats order comparisons
+-                // that may be expensive for an application-backed navigator.
+-                let mut nodes = Vec::with_capacity(left.len() + right.len());
+-                let mut left = left.into_iter().peekable();
+-                let mut right = right.into_iter().peekable();
+-                while let (Some(a), Some(b)) = (left.peek(), right.peek()) {
+-                    match nav.compare_document_order(a, b) {
+-                        Ordering::Less => nodes.push(left.next().unwrap()),
+-                        Ordering::Greater => nodes.push(right.next().unwrap()),
+-                        Ordering::Equal => {
+-                            nodes.push(left.next().unwrap());
+-                            right.next();
+-                        }
+-                    }
+-                }
+-                nodes.extend(left);
+-                nodes.extend(right);
+-                Ok(Value::Nodes(nodes))
++                let mut nodes = a.as_nodes()?.to_vec();
++                self.spend(nodes.len() + b.as_nodes()?.len())?;
++                nodes.extend_from_slice(b.as_nodes()?);
++                Ok(Value::Nodes(self.normalize(nodes)))
+             }
+             Eq | Ne => Ok(Value::Boolean(self.equality(&a, &b, op == Ne)?)),
+             Lt | Le | Gt | Ge => Ok(Value::Boolean(self.relational(&a, &b, op)?)),
+@@ -272,39 +227,13 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
+         let nav = self.ctx.navigator;
+         match (a, b) {
+             (Value::Nodes(xs), Value::Nodes(ys)) => {
+-                let Some((first, rest)) = xs.split_first().filter(|_| !ys.is_empty()) else {
+-                    return Ok(false);
+-                };
+-                self.spend(1)?;
+-                let first = nav.string_value(first)?;
+-
+-                // Keep the first row's short-circuit order: an early match
+-                // must not read later fallible node values. Build a string
+-                // index only if equality can require another row.
+-                let mut strings = HashSet::new();
+-                for y in ys {
+-                    self.spend(1)?;
+-                    let y = nav.string_value(y)?;
+-                    if (first == y) != unequal {
+-                        return Ok(true);
+-                    }
+-                    if !unequal && !rest.is_empty() {
+-                        strings.insert(y);
+-                    }
+-                }
+-
+-                for x in rest {
+-                    self.spend(1)?;
++                for x in xs {
+                     let x = nav.string_value(x)?;
+-                    // If != reached here, every right value equals `first`.
+-                    // A differing left value suffices. != is not the negation
+-                    // of existential equality.
+-                    if if unequal {
+-                        x != first
+-                    } else {
+-                        strings.contains(&x)
+-                    } {
+-                        return Ok(true);
++                    for y in ys {
++                        self.spend(1)?;
++                        if (x == nav.string_value(y)?) != unequal {
++                            return Ok(true);
++                        }
+                     }
+                 }
+                 Ok(false)
+@@ -377,21 +306,27 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
+         depth: usize,
+     ) -> Result<Vec<N::Node>> {
+         for predicate in predicates {
+-            retain_nodes(&mut nodes, |node, position, size| {
++            let size = nodes.len();
++            let mut result = Vec::new();
++            for (index, node) in nodes.into_iter().enumerate() {
+                 let value = self.expr(
+                     predicate,
+                     &Focus {
+                         node: node.clone(),
+-                        position,
++                        position: index + 1,
+                         size,
+                     },
+                     depth,
+                 )?;
+-                Ok(match value {
+-                    Value::Number(n) => n == position as f64,
++                let keep = match value {
++                    Value::Number(n) => n == (index + 1) as f64,
+                     _ => value.to_boolean(),
+-                })
+-            })?;
++                };
++                if keep {
++                    result.push(node);
++                }
++            }
++            nodes = result;
+         }
+         Ok(nodes)
+     }
+@@ -406,10 +341,13 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
+         let mut result = Vec::new();
+         for node in nodes {
+             self.spend(1)?;
+-            let mut matching = self.axis(&node, step.axis)?;
+-            retain_nodes(&mut matching, |candidate, _, _| {
+-                self.matches(candidate, &test, principal)
+-            })?;
++            let candidates = self.axis(&node, step.axis)?;
++            let mut matching = Vec::new();
++            for candidate in candidates {
++                if self.matches(&candidate, &test, principal)? {
++                    matching.push(candidate);
++                }
++            }
+             result.extend(self.filter(matching, &step.predicates, depth)?);
+         }
+         Ok(self.normalize(result))
+diff --git a/src/value.rs b/src/value.rs
+index de264dc..4bc17a7 100644
+--- a/src/value.rs
++++ b/src/value.rs
+@@ -48,13 +48,6 @@ impl<N> Value<N> {
+             _ => Err(Error::new(ErrorKind::Type, "expected a node set")),
+         }
+     }
+-
+-    pub(crate) fn into_nodes(self) -> Result<Vec<N>> {
+-        match self {
+-            Self::Nodes(nodes) => Ok(nodes),
+-            _ => Err(Error::new(ErrorKind::Type, "expected a node set")),
+-        }
+-    }
+ }
+ 
+ pub(crate) fn first_node<'a, T: Navigator>(

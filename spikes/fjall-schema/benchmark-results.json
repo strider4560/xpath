@@ -1,0 +1,89 @@
+{
+  "date": "2026-10-10",
+  "rust": "1.90.0",
+  "fjall": "3.1.10",
+  "fixture_rows": 29,
+  "cpu": "Intel Xeon Platinum 8573C, shared x86_64 VM",
+  "criterion_samples": 30,
+  "warmup_ms": 200,
+  "measurement_seconds": 1,
+  "results": [
+    {
+      "workload": "build_three_criterion_plan",
+      "estimate_ns": 789666.9939714437,
+      "ci95_ns": [
+        736272.7779431952,
+        851436.3957787335
+      ],
+      "before_presence_check_change": {
+        "estimate_ns": 757081.7512427287,
+        "ci95_ns": [
+          752369.1123330133,
+          762621.5165725439
+        ]
+      }
+    },
+    {
+      "workload": "point_row",
+      "estimate_ns": 1189.3050001768581,
+      "ci95_ns": [
+        1181.5094148356857,
+        1197.6142629769015
+      ]
+    },
+    {
+      "workload": "preorder_decode_all",
+      "estimate_ns": 52916.026658230716,
+      "ci95_ns": [
+        45978.19746025344,
+        61442.21769144524
+      ]
+    },
+    {
+      "workload": "skip_interface_subtree",
+      "estimate_ns": 3824.620706037386,
+      "ci95_ns": [
+        3805.78538608297,
+        3839.6767169756695
+      ]
+    },
+    {
+      "workload": "walk_built_plan",
+      "estimate_ns": 4.743034465494385,
+      "ci95_ns": [
+        4.100530669926694,
+        5.7164382592902685
+      ]
+    },
+    {
+      "workload": "xpath_metadata",
+      "estimate_ns": 204234.7828373636,
+      "ci95_ns": [
+        199002.31107586192,
+        210486.2936578431
+      ],
+      "before_presence_check_change": {
+        "estimate_ns": 205508.56161722995,
+        "ci95_ns": [
+          204251.18225209447,
+          206747.35735979574
+        ]
+      }
+    },
+    {
+      "workload": "xpath_path",
+      "estimate_ns": 33200.30710979132,
+      "ci95_ns": [
+        33016.434190858934,
+        33401.398133799135
+      ],
+      "before_presence_check_change": {
+        "estimate_ns": 34182.54661932462,
+        "ci95_ns": [
+          33924.52893836389,
+          34488.654704712004
+        ]
+      }
+    }
+  ]
+}

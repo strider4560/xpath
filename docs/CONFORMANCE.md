@@ -40,13 +40,14 @@ exception is an evaluation-time unbound namespace prefix.
 
 | Check | Result |
 |---|---|
-| `cargo test --locked --all-features` | 47 Rust tests pass |
+| `cargo test --locked --all-features` | 52 Rust tests pass |
 | Library unit tests | 27 pass |
-| Custom-tree/evaluator tests | 8 pass |
+| Custom-tree/evaluator tests | 9 pass |
+| Comparison correctness/complexity regressions | 4 pass |
 | Embedding namespace test | 1 passes |
 | Jaxen integration test | 1 passes, executing 296 definitions |
 | XML adapter tests | 10 pass |
-| `cargo test --locked --no-default-features` | 35 applicable tests pass |
+| `cargo test --locked --no-default-features` | 40 applicable tests pass |
 | `cargo fmt --all -- --check` | Pass |
 | `cargo clippy --all-targets --all-features -- -D warnings` | Pass |
 | `RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features` | Pass |
@@ -90,8 +91,12 @@ The corpus and differential runs provide evidence, not exhaustive proof.
 
 Compilation limits, configurable evaluation limits, the optional 256-level XML
 depth limit, and string/host-callback budgeting boundaries are documented in the
-README. Intermediate node sets are materialized. No optimizer, index pushdown,
-constant-memory claim, hot-path benchmark, or full YANG validator is included.
+README. Intermediate node sets are materialized. No general query optimizer,
+index pushdown, constant-memory claim, or full YANG validator is included.
+The measured evaluator optimizations and 35 Criterion workloads are documented
+in [PERFORMANCE.md](PERFORMANCE.md). Equality/inequality regressions additionally
+check all pairs of 31 small string sets against the existential definition,
+short-circuit/error behavior, and linear string-read counts.
 
 The YANG integration points are fallible storage iterators, stable node handles,
 expanded names, an explicit module-default element namespace, variable bindings,

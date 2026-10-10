@@ -1,0 +1,33 @@
+{
+  "fixture": "demo-schema.json",
+  "description": "Manual expectations from the YANG fixture and its documented preorder; no XPath engine was used to select these nodes. All IDs refer to the default feature-disabled export only.",
+  "prefixes": {"if": "urn:demo:if", "aug": "urn:demo:augment"},
+  "node_count_including_root": 29,
+  "module_names": ["demo-augment", "demo-if"],
+  "top_level": [1, 2, 26],
+  "interface_node": 3,
+  "interface_physical_children": [4, 5, 6, 7, 8, 9, 10, 16, 17, 18, 22, 23],
+  "interface_logical_children_with_choice_and_case_transparent": [4, 5, 6, 7, 8, 9, 12, 13, 15, 16, 17, 18, 22, 23],
+  "all_leaves": [1, 4, 5, 6, 7, 8, 12, 13, 15, 16, 17, 19, 21, 22, 24, 25],
+  "all_leaf_lists": [9],
+  "all_lists": [3],
+  "physical_choice_and_case_nodes": [10, 11, 14],
+  "key_leaves": [4],
+  "mandatory_nodes": [4, 7, 10, 24],
+  "presence_containers": [23, 26],
+  "config_false_nodes": [1, 18, 19, 20, 21, 25],
+  "demo_augment_namespace_nodes": [1, 22, 23, 24, 25],
+  "nodes_with_when": [16, 22, 23],
+  "nodes_with_must": [3, 6, 25],
+  "deprecated_nodes": [6],
+  "obsolete_nodes": [17],
+  "leafref_nodes": [8],
+  "absent_disabled_feature_node": "{urn:demo:if}diagnostic-mode",
+  "feature_enabled_fixture": {
+    "fixture": "demo-schema-feature.json",
+    "node_count_including_root": 30,
+    "enabled_features": {"demo-if": ["diagnostics"], "demo-augment": []},
+    "diagnostic_mode_node": 17,
+    "description": "IDs after enabled-label shift by one in this export; node IDs are schema-selection-local."
+  }
+}

@@ -1,0 +1,33 @@
+module demo-augment {
+  yang-version 1.1;
+  namespace "urn:demo:augment";
+  prefix aug;
+
+  import demo-if { prefix if; revision-date 2026-10-10; }
+
+  revision 2026-10-10 {
+    description "Foreign-namespace augment for the flat planning fixture.";
+  }
+
+  leaf source {
+    config false;
+    type string;
+  }
+
+  augment "/if:interfaces/if:interface" {
+    when "if:enabled = 'true'";
+    leaf tag { type string; }
+    container telemetry {
+      presence "Collect telemetry for this interface.";
+      leaf sample-interval {
+        type uint32;
+        mandatory true;
+      }
+      leaf temperature {
+        config false;
+        type decimal64 { fraction-digits 2; }
+        must ". >= -40";
+      }
+    }
+  }
+}

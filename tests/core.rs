@@ -87,6 +87,39 @@ fn union_sorting_dedup_and_step_predicates() {
     assert_eq!(nodes("//n[. > 2][1]", 0), vec![3, 4]);
     assert_eq!(nodes("//n/..", 0), vec![1, 3]);
 }
+
+#[test]
+fn normalized_paths_preserve_nested_axis_focus_and_external_sets() {
+    // Each reverse-axis predicate sees its own reverse-ordered candidates;
+    // the completed path and parenthesized filter see document order.
+    assert_eq!(nodes("//n/ancestor::*[1]", 0), vec![1, 3]);
+    assert_eq!(nodes("(//n/ancestor::*)[last()]", 0), vec![3]);
+    assert_eq!(nodes("//n[. > 2][position() = last()]", 0), vec![3, 5]);
+    let context = Context::new(&Tree, 0)
+        .with_variable("nodes", Value::Nodes(vec![5, 2, 4, 2, 5]))
+        .with_function(ExpandedName::local("external"), |_, _| {
+            Ok(Value::Nodes(vec![5, 3, 5, 4]))
+        });
+    for (expression, expected) in [
+        ("$nodes", vec![2, 4, 5]),
+        ("$nodes/self::node()", vec![2, 4, 5]),
+        ("$nodes | external()", vec![2, 3, 4, 5]),
+        ("/missing | $nodes", vec![2, 4, 5]),
+        ("$nodes | /missing", vec![2, 4, 5]),
+        ("/root | $nodes", vec![1, 2, 4, 5]),
+        ("($nodes | external())[last()]", vec![5]),
+        ("external()/ancestor::*", vec![1, 3]),
+        ("(external())[1]", vec![3]),
+    ] {
+        assert_eq!(
+            XPath::compile(expression)
+                .unwrap()
+                .select(&context)
+                .unwrap(),
+            expected
+        );
+    }
+}
 #[test]
 fn existential_comparisons_and_scalar_coercions() {
     assert!(boolean("/root/n = 2"));

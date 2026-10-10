@@ -97,6 +97,12 @@ extension-function semantics. Evaluate a `must` or `when` result with
 `Value::to_boolean()` after constructing that context. This crate does not link
 libyang, CEL, Java, or Fjall; storage integration is through `Navigator`.
 
+An executable [Fjall flat-schema spike](spikes/fjall-schema/README.md) stores a
+real libyang-compiled schema in `schema` and illustrative values in `data`,
+adapts the flat index to this crate, and builds cursor-walkable selection trees.
+It is a separate experimental package requiring Rust 1.90; the core crate's
+dependencies and Rust 1.85 requirement are unchanged.
+
 ## Correctness and limits
 
 `cargo test --test jaxen -- --nocapture` reads the original pinned Jaxen XML
@@ -130,8 +136,27 @@ with `Document::register_id`; an attribute spelled `id` is not automatically typ
 as an XML ID. A custom navigator can implement the full host ID policy.
 
 Node sets and intermediate results are materialized. Cursor input does not imply
-constant-memory evaluation, index pushdown, an optimizer or measured hot-path
-performance. These can be added behind the existing navigator/expression boundary.
+constant-memory evaluation or index pushdown. The evaluator reuses node buffers,
+merges sorted unions, and indexes string values for large node-set equality
+comparisons. It does not include a general query optimizer or storage indexes.
+
+## Performance
+
+Compile selectors once and reuse them across contexts. The Criterion suite
+covers compilation, schema-shaped selection, data lists of 10–1,000 entries,
+`when` evaluation, axes, unions, node-set comparisons, and XML parsing:
+
+```sh
+cargo bench --locked --bench xpath
+cargo bench --locked --no-default-features --bench xpath
+cargo bench --locked --bench xpath -- --counts
+```
+
+Fixture creation and expression compilation are outside cached-evaluation timing
+loops. Expected answers are checked before timing. `--counts` collects navigator
+calls separately, without instrumenting the timed runs. Criterion is a development
+dependency only. See [the performance report](docs/PERFORMANCE.md) for before/after
+results, raw samples, reproduction commands, and remaining bottlenecks.
 
 ## Build and verify
 

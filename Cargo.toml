@@ -17,6 +17,11 @@ roxmltree = { version = "0.20", optional = true }
 
 [dev-dependencies]
 roxmltree = "0.20"
+criterion = { version = "=0.5.1", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "xpath"
+harness = false
 
 [[test]]
 name = "jaxen"

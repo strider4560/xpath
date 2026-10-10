@@ -48,6 +48,13 @@ impl<N> Value<N> {
             _ => Err(Error::new(ErrorKind::Type, "expected a node set")),
         }
     }
+
+    pub(crate) fn into_nodes(self) -> Result<Vec<N>> {
+        match self {
+            Self::Nodes(nodes) => Ok(nodes),
+            _ => Err(Error::new(ErrorKind::Type, "expected a node set")),
+        }
+    }
 }
 
 pub(crate) fn first_node<'a, T: Navigator>(

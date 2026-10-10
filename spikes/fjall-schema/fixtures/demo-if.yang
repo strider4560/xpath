@@ -1,0 +1,88 @@
+module demo-if {
+  yang-version 1.1;
+  namespace "urn:demo:if";
+  prefix if;
+
+  revision 2026-10-10 {
+    description "Deterministic compiled-schema planning fixture.";
+  }
+
+  feature diagnostics {
+    description "Expose the optional diagnostic-mode leaf.";
+  }
+
+  grouping common-settings {
+    leaf description {
+      type string;
+      status deprecated;
+      must "not(contains(., '\"'))\n\tor string-length(.) <= 80";
+    }
+    leaf mtu {
+      type uint16;
+      mandatory true;
+    }
+  }
+
+  container interfaces {
+    list interface {
+      key name;
+      must "not(enabled = 'true') or mtu >= 576";
+
+      leaf name { type string; }
+      leaf enabled { type boolean; default true; }
+      uses common-settings;
+
+      leaf peer {
+        type leafref { path "../name"; }
+      }
+      leaf-list aliases { type string; }
+
+      choice addressing {
+        mandatory true;
+        case static {
+          leaf static-address { type string; }
+          leaf static-prefix { type uint8; }
+        }
+        case dynamic {
+          leaf dhcp { type boolean; }
+        }
+      }
+
+      leaf enabled-label {
+        when "../enabled = 'true'";
+        type string;
+      }
+      leaf diagnostic-mode {
+        if-feature diagnostics;
+        type empty;
+      }
+      leaf legacy-name {
+        type string;
+        status obsolete;
+      }
+
+      container state {
+        config false;
+        leaf oper-status {
+          type enumeration { enum up; enum down; }
+        }
+        container counters {
+          leaf packets { type uint64; }
+        }
+      }
+    }
+  }
+
+  container inventory {
+    presence "Enable inventory storage.";
+    anydata payload;
+    anyxml legacy-payload;
+  }
+
+  // These are intentionally outside the exporter's datastore-only scope.
+  rpc reset {
+    input { leaf target { type string; } }
+    output { leaf accepted { type boolean; } }
+  }
+  notification changed { leaf name { type string; } }
+}
