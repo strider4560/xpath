@@ -1,0 +1,556 @@
+use crate::{
+    ast::{BinaryOp, Expr, NodeTest, QName, Step},
+    functions,
+    value::string_to_number,
+    Axis, Context, Error, ErrorKind, ExpandedName, FunctionContext, Navigator, NodeKind, Result,
+    Value,
+};
+use std::collections::HashSet;
+
+struct Focus<N> {
+    node: N,
+    position: usize,
+    size: usize,
+}
+
+pub(crate) fn evaluate<N: Navigator>(expr: &Expr, ctx: &Context<'_, N>) -> Result<Value<N::Node>> {
+    ctx.navigator.validate_node(&ctx.node)?;
+    let mut evaluator = Evaluator {
+        ctx,
+        remaining: ctx.limits.max_operations,
+    };
+    evaluator.expr(
+        expr,
+        &Focus {
+            node: ctx.node.clone(),
+            position: ctx.position,
+            size: ctx.size,
+        },
+        0,
+    )
+}
+
+struct Evaluator<'a, 'b, N: Navigator> {
+    ctx: &'a Context<'b, N>,
+    remaining: usize,
+}
+
+impl<N: Navigator> Evaluator<'_, '_, N> {
+    fn spend(&mut self, amount: usize) -> Result<()> {
+        self.remaining = self
+            .remaining
+            .checked_sub(amount)
+            .ok_or_else(|| Error::new(ErrorKind::Limit, "XPath evaluation work limit exceeded"))?;
+        Ok(())
+    }
+
+    fn normalize(&self, mut nodes: Vec<N::Node>) -> Vec<N::Node> {
+        let mut seen = HashSet::with_capacity(nodes.len());
+        nodes.retain(|node| seen.insert(node.clone()));
+        nodes.sort_by(|a, b| self.ctx.navigator.compare_document_order(a, b));
+        nodes
+    }
+
+    fn canonicalize(&mut self, value: Value<N::Node>) -> Result<Value<N::Node>> {
+        match value {
+            Value::Nodes(nodes) => {
+                self.spend(nodes.len())?;
+                for node in &nodes {
+                    self.ctx.navigator.validate_node(node)?;
+                }
+                Ok(Value::Nodes(self.normalize(nodes)))
+            }
+            other => Ok(other),
+        }
+    }
+
+    fn namespace(&self, prefix: &str) -> Result<String> {
+        if prefix == "xml" {
+            return Ok("http://www.w3.org/XML/1998/namespace".into());
+        }
+        self.ctx.namespaces.get(prefix).cloned().ok_or_else(|| {
+            Error::new(
+                ErrorKind::Namespace,
+                format!("unbound namespace prefix: {prefix}"),
+            )
+        })
+    }
+
+    fn name(&self, name: &QName) -> Result<ExpandedName> {
+        Ok(ExpandedName::new(
+            match &name.prefix {
+                Some(p) => self.namespace(p)?,
+                None => String::new(),
+            },
+            &name.local,
+        ))
+    }
+
+    fn expr(
+        &mut self,
+        expr: &Expr,
+        focus: &Focus<N::Node>,
+        depth: usize,
+    ) -> Result<Value<N::Node>> {
+        self.spend(1)?;
+        if depth >= self.ctx.limits.max_depth {
+            return Err(Error::new(
+                ErrorKind::Limit,
+                "XPath evaluation depth limit exceeded",
+            ));
+        }
+        match expr {
+            Expr::String(s) => Ok(Value::String(s.clone())),
+            Expr::Number(n) => Ok(Value::Number(*n)),
+            Expr::Variable(q) => {
+                let name = self.name(q)?;
+                let value = self.ctx.variables.get(&name).ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Variable,
+                        format!("unbound variable: {}", q.local),
+                    )
+                })?;
+                if let Value::Nodes(nodes) = value {
+                    if nodes.len() > self.remaining {
+                        return Err(Error::new(
+                            ErrorKind::Limit,
+                            "variable node-set exceeds work limit",
+                        ));
+                    }
+                }
+                self.canonicalize(value.clone())
+            }
+            Expr::Function(q, arguments) => {
+                let name = self.name(q)?;
+                let mut args = Vec::with_capacity(arguments.len());
+                for argument in arguments {
+                    args.push(self.expr(argument, focus, depth + 1)?);
+                }
+                let call_context = FunctionContext {
+                    navigator: self.ctx.navigator,
+                    node: &focus.node,
+                    initial_node: &self.ctx.node,
+                    position: focus.position,
+                    size: focus.size,
+                };
+                if name.namespace_uri.is_empty() {
+                    if let Some(result) =
+                        functions::call(&name.local_name, &args, &call_context, &mut self.remaining)
+                    {
+                        return self.canonicalize(result?);
+                    }
+                }
+                let function = self.ctx.functions.get(&name).ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Function,
+                        format!("unknown function: {}", q.local),
+                    )
+                })?;
+                self.canonicalize(function(&call_context, &args)?)
+            }
+            Expr::Unary(inner) => Ok(Value::Number(
+                -self
+                    .expr(inner, focus, depth + 1)?
+                    .to_number(self.ctx.navigator)?,
+            )),
+            Expr::Binary(operator, left, right) => {
+                let a = self.expr(left, focus, depth + 1)?;
+                if *operator == BinaryOp::Or && a.to_boolean() {
+                    return Ok(Value::Boolean(true));
+                }
+                if *operator == BinaryOp::And && !a.to_boolean() {
+                    return Ok(Value::Boolean(false));
+                }
+                let b = self.expr(right, focus, depth + 1)?;
+                self.binary(*operator, a, b)
+            }
+            Expr::Path {
+                base,
+                absolute,
+                steps,
+            } => {
+                let mut nodes = if let Some(base) = base {
+                    self.expr(base, focus, depth + 1)?.as_nodes()?.to_vec()
+                } else if *absolute {
+                    vec![self.root(&focus.node)?]
+                } else {
+                    vec![focus.node.clone()]
+                };
+                for step in steps {
+                    nodes = self.step(nodes, step, depth + 1)?;
+                }
+                Ok(Value::Nodes(self.normalize(nodes)))
+            }
+            Expr::Filter { base, predicates } => {
+                let nodes = self.expr(base, focus, depth + 1)?.as_nodes()?.to_vec();
+                let nodes = self.normalize(nodes);
+                Ok(Value::Nodes(self.filter(nodes, predicates, depth + 1)?))
+            }
+        }
+    }
+
+    fn binary(
+        &mut self,
+        op: BinaryOp,
+        a: Value<N::Node>,
+        b: Value<N::Node>,
+    ) -> Result<Value<N::Node>> {
+        use BinaryOp::*;
+        let nav = self.ctx.navigator;
+        match op {
+            Or => Ok(Value::Boolean(a.to_boolean() || b.to_boolean())),
+            And => Ok(Value::Boolean(a.to_boolean() && b.to_boolean())),
+            Union => {
+                let mut nodes = a.as_nodes()?.to_vec();
+                self.spend(nodes.len() + b.as_nodes()?.len())?;
+                nodes.extend_from_slice(b.as_nodes()?);
+                Ok(Value::Nodes(self.normalize(nodes)))
+            }
+            Eq | Ne => Ok(Value::Boolean(self.equality(&a, &b, op == Ne)?)),
+            Lt | Le | Gt | Ge => Ok(Value::Boolean(self.relational(&a, &b, op)?)),
+            Add | Sub | Mul | Div | Mod => {
+                let x = a.to_number(nav)?;
+                let y = b.to_number(nav)?;
+                Ok(Value::Number(match op {
+                    Add => x + y,
+                    Sub => x - y,
+                    Mul => x * y,
+                    Div => x / y,
+                    Mod => x % y,
+                    _ => unreachable!(),
+                }))
+            }
+        }
+    }
+
+    fn equality(&mut self, a: &Value<N::Node>, b: &Value<N::Node>, unequal: bool) -> Result<bool> {
+        let nav = self.ctx.navigator;
+        match (a, b) {
+            (Value::Nodes(xs), Value::Nodes(ys)) => {
+                for x in xs {
+                    let x = nav.string_value(x)?;
+                    for y in ys {
+                        self.spend(1)?;
+                        if (x == nav.string_value(y)?) != unequal {
+                            return Ok(true);
+                        }
+                    }
+                }
+                Ok(false)
+            }
+            (Value::Nodes(nodes), scalar) | (scalar, Value::Nodes(nodes)) => {
+                if let Value::Boolean(value) = scalar {
+                    return Ok((nodes.is_empty() != *value) != unequal);
+                }
+                for node in nodes {
+                    self.spend(1)?;
+                    let string = nav.string_value(node)?;
+                    let equal = match scalar {
+                        Value::Number(number) => string_to_number(&string) == *number,
+                        Value::String(other) => string == *other,
+                        _ => unreachable!(),
+                    };
+                    if equal != unequal {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            _ => {
+                let equal = if matches!(a, Value::Boolean(_)) || matches!(b, Value::Boolean(_)) {
+                    a.to_boolean() == b.to_boolean()
+                } else if matches!(a, Value::Number(_)) || matches!(b, Value::Number(_)) {
+                    a.to_number(nav)? == b.to_number(nav)?
+                } else {
+                    a.to_string(nav)? == b.to_string(nav)?
+                };
+                Ok(equal != unequal)
+            }
+        }
+    }
+
+    fn relational(&mut self, a: &Value<N::Node>, b: &Value<N::Node>, op: BinaryOp) -> Result<bool> {
+        let nav = self.ctx.navigator;
+        let numbers = |value: &Value<N::Node>| -> Result<Vec<f64>> {
+            match value {
+                Value::Nodes(nodes) => nodes
+                    .iter()
+                    .map(|n| Ok(string_to_number(&nav.string_value(n)?)))
+                    .collect(),
+                _ => Ok(vec![value.to_number(nav)?]),
+            }
+        };
+        let xs = numbers(a)?;
+        let ys = numbers(b)?;
+        for x in &xs {
+            for y in &ys {
+                self.spend(1)?;
+                if match op {
+                    BinaryOp::Lt => x < y,
+                    BinaryOp::Le => x <= y,
+                    BinaryOp::Gt => x > y,
+                    BinaryOp::Ge => x >= y,
+                    _ => unreachable!(),
+                } {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn filter(
+        &mut self,
+        mut nodes: Vec<N::Node>,
+        predicates: &[Expr],
+        depth: usize,
+    ) -> Result<Vec<N::Node>> {
+        for predicate in predicates {
+            let size = nodes.len();
+            let mut result = Vec::new();
+            for (index, node) in nodes.into_iter().enumerate() {
+                let value = self.expr(
+                    predicate,
+                    &Focus {
+                        node: node.clone(),
+                        position: index + 1,
+                        size,
+                    },
+                    depth,
+                )?;
+                let keep = match value {
+                    Value::Number(n) => n == (index + 1) as f64,
+                    _ => value.to_boolean(),
+                };
+                if keep {
+                    result.push(node);
+                }
+            }
+            nodes = result;
+        }
+        Ok(nodes)
+    }
+
+    fn step(&mut self, nodes: Vec<N::Node>, step: &Step, depth: usize) -> Result<Vec<N::Node>> {
+        let test = self.resolve_test(&step.test, step.axis)?;
+        let principal = match step.axis {
+            Axis::Attribute => NodeKind::Attribute,
+            Axis::Namespace => NodeKind::Namespace,
+            _ => NodeKind::Element,
+        };
+        let mut result = Vec::new();
+        for node in nodes {
+            self.spend(1)?;
+            let candidates = self.axis(&node, step.axis)?;
+            let mut matching = Vec::new();
+            for candidate in candidates {
+                if self.matches(&candidate, &test, principal)? {
+                    matching.push(candidate);
+                }
+            }
+            result.extend(self.filter(matching, &step.predicates, depth)?);
+        }
+        Ok(self.normalize(result))
+    }
+
+    fn resolve_test(&self, test: &NodeTest, axis: Axis) -> Result<ResolvedTest> {
+        Ok(match test {
+            NodeTest::Any => ResolvedTest::Any,
+            NodeTest::Name(n) => ResolvedTest::Name(
+                if n.prefix.is_none() && !matches!(axis, Axis::Attribute | Axis::Namespace) {
+                    ExpandedName::new(&self.ctx.default_element_namespace, &n.local)
+                } else {
+                    self.name(n)?
+                },
+            ),
+            NodeTest::NamespaceWildcard(p) => ResolvedTest::Namespace(self.namespace(p)?),
+            NodeTest::Node => ResolvedTest::Node,
+            NodeTest::Text => ResolvedTest::Kind(NodeKind::Text),
+            NodeTest::Comment => ResolvedTest::Kind(NodeKind::Comment),
+            NodeTest::ProcessingInstruction(target) => ResolvedTest::Pi(target.clone()),
+        })
+    }
+
+    fn matches(&self, node: &N::Node, test: &ResolvedTest, principal: NodeKind) -> Result<bool> {
+        let nav = self.ctx.navigator;
+        let kind = nav.kind(node);
+        Ok(match test {
+            ResolvedTest::Any => kind == principal,
+            ResolvedTest::Name(name) => kind == principal && nav.name(node)?.as_ref() == Some(name),
+            ResolvedTest::Namespace(uri) => {
+                kind == principal && nav.name(node)?.is_some_and(|n| n.namespace_uri == *uri)
+            }
+            ResolvedTest::Node => true,
+            ResolvedTest::Kind(k) => kind == *k,
+            ResolvedTest::Pi(target) => {
+                kind == NodeKind::ProcessingInstruction
+                    && match target {
+                        None => true,
+                        Some(target) => nav.name(node)?.is_some_and(|n| n.local_name == *target),
+                    }
+            }
+        })
+    }
+
+    fn parent(&mut self, node: &N::Node) -> Result<Option<N::Node>> {
+        self.spend(1)?;
+        let parent = self.ctx.navigator.parent(node)?;
+        if let Some(node) = &parent {
+            self.ctx.navigator.validate_node(node)?;
+        }
+        Ok(parent)
+    }
+
+    fn root(&mut self, node: &N::Node) -> Result<N::Node> {
+        let mut node = node.clone();
+        while let Some(parent) = self.parent(&node)? {
+            node = parent;
+        }
+        Ok(node)
+    }
+
+    fn children(&mut self, node: &N::Node) -> Result<Vec<N::Node>> {
+        if !matches!(
+            self.ctx.navigator.kind(node),
+            NodeKind::Root | NodeKind::Element
+        ) {
+            return Ok(Vec::new());
+        }
+        let mut nodes = Vec::new();
+        for child in self.ctx.navigator.children(node) {
+            self.spend(1)?;
+            let child = child?;
+            self.ctx.navigator.validate_node(&child)?;
+            nodes.push(child);
+        }
+        Ok(nodes)
+    }
+
+    fn descendants(&mut self, node: &N::Node, include_self: bool) -> Result<Vec<N::Node>> {
+        let mut result = if include_self {
+            vec![node.clone()]
+        } else {
+            Vec::new()
+        };
+        let mut pending = self.children(node)?;
+        pending.reverse();
+        while let Some(child) = pending.pop() {
+            result.push(child.clone());
+            let mut children = self.children(&child)?;
+            children.reverse();
+            pending.extend(children);
+        }
+        Ok(result)
+    }
+
+    fn siblings(&mut self, node: &N::Node, preceding: bool) -> Result<Vec<N::Node>> {
+        if matches!(
+            self.ctx.navigator.kind(node),
+            NodeKind::Attribute | NodeKind::Namespace
+        ) {
+            return Ok(Vec::new());
+        }
+        let Some(parent) = self.parent(node)? else {
+            return Ok(Vec::new());
+        };
+        let children = self.children(&parent)?;
+        let Some(index) = children.iter().position(|n| n == node) else {
+            return Ok(Vec::new());
+        };
+        Ok(if preceding {
+            children[..index].iter().rev().cloned().collect()
+        } else {
+            children[index + 1..].to_vec()
+        })
+    }
+
+    fn axis(&mut self, node: &N::Node, axis: Axis) -> Result<Vec<N::Node>> {
+        use Axis::*;
+        match axis {
+            SelfAxis => Ok(vec![node.clone()]),
+            Child => self.children(node),
+            Descendant => self.descendants(node, false),
+            DescendantOrSelf => self.descendants(node, true),
+            Parent => Ok(self.parent(node)?.into_iter().collect()),
+            Ancestor | AncestorOrSelf => {
+                let mut result = if axis == AncestorOrSelf {
+                    vec![node.clone()]
+                } else {
+                    Vec::new()
+                };
+                let mut current = node.clone();
+                while let Some(parent) = self.parent(&current)? {
+                    result.push(parent.clone());
+                    current = parent;
+                }
+                Ok(result)
+            }
+            Attribute => {
+                let mut result = Vec::new();
+                if self.ctx.navigator.kind(node) == NodeKind::Element {
+                    for n in self.ctx.navigator.attributes(node) {
+                        self.spend(1)?;
+                        let n = n?;
+                        self.ctx.navigator.validate_node(&n)?;
+                        result.push(n);
+                    }
+                }
+                Ok(result)
+            }
+            Namespace => {
+                let mut result = Vec::new();
+                if self.ctx.navigator.kind(node) == NodeKind::Element {
+                    for n in self.ctx.navigator.namespaces(node) {
+                        self.spend(1)?;
+                        let n = n?;
+                        self.ctx.navigator.validate_node(&n)?;
+                        result.push(n);
+                    }
+                }
+                Ok(result)
+            }
+            FollowingSibling => self.siblings(node, false),
+            PrecedingSibling => self.siblings(node, true),
+            Following | Preceding => {
+                let preceding = axis == Preceding;
+                let mut result = Vec::new();
+                let mut current = node.clone();
+                if matches!(
+                    self.ctx.navigator.kind(node),
+                    NodeKind::Attribute | NodeKind::Namespace
+                ) {
+                    let Some(owner) = self.parent(node)? else {
+                        return Ok(result);
+                    };
+                    if !preceding {
+                        result.extend(self.descendants(&owner, false)?);
+                    }
+                    current = owner;
+                }
+                loop {
+                    for sibling in self.siblings(&current, preceding)? {
+                        let mut subtree = self.descendants(&sibling, true)?;
+                        if preceding {
+                            subtree.reverse();
+                        }
+                        result.extend(subtree);
+                    }
+                    match self.parent(&current)? {
+                        Some(parent) => current = parent,
+                        None => break,
+                    }
+                }
+                Ok(result)
+            }
+        }
+    }
+}
+
+enum ResolvedTest {
+    Any,
+    Name(ExpandedName),
+    Namespace(String),
+    Node,
+    Kind(NodeKind),
+    Pi(Option<String>),
+}

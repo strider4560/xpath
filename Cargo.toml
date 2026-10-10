@@ -1,0 +1,31 @@
+[package]
+name = "xpath1"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "XPath 1.0 over application-defined trees, with a Jaxen conformance corpus"
+license = "MIT"
+readme = "README.md"
+exclude = [".superpowers", "target"]
+
+[features]
+default = ["xml"]
+xml = ["dep:roxmltree"]
+
+[dependencies]
+roxmltree = { version = "0.20", optional = true }
+
+[dev-dependencies]
+roxmltree = "0.20"
+
+[[test]]
+name = "jaxen"
+required-features = ["xml"]
+
+[[example]]
+name = "xml"
+required-features = ["xml"]
+
+[[example]]
+name = "yang"
+required-features = ["xml"]

@@ -1,0 +1,8 @@
+[package]
+name = "xpath1-differential-client"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+xpath1 = { path = "../..", features = ["xml"] }
