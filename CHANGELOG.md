@@ -45,7 +45,7 @@ pass unchanged.
   `namespace-uri()` still propagate errors.
 - The R2 fast path assumes `current()` is YANG's function returning the
   context's initial node. Keys must identify at most one entry.
-- R4 is deferred; see `docs/PERFORMANCE.md`.
+- R4 (borrowed string values) is deferred: `string_value()` returns `String`; a `Cow<str>` or caller-supplied buffer would let leaf values come straight from the row.
 
 ## 0.1.0
 

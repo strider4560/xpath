@@ -197,7 +197,7 @@ is to be measured with the actual YANG store, not in this suite. The tests in
 enumeration for `a/b[c = 'x']`; no `children()` call for `a/b/d` with
 `children_named`).
 
-**R4 is deferred.** The fifth hook of D21 (§12.8 of the yang-rs design) is not
-part of 0.2.0; descendant traversal and relational node-set comparisons remain
-as described above.
+**R4 (borrowed string values) is deferred:** `string_value()` returns
+`String`; a `Cow<str>` or caller-supplied buffer would let leaf values come
+straight from the row.
 
