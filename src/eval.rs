@@ -494,7 +494,7 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
         };
         let mut values = Vec::with_capacity(keys.len());
         for (key, rhs) in keys {
-            match self.expr(rhs, &focus, depth) {
+            match self.expr(rhs, &focus, depth + 1) {
                 Ok(value) => values.push((key.clone(), value)),
                 Err(_) => {
                     self.remaining = budget;
