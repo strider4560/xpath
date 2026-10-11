@@ -5,7 +5,7 @@
 //! module provides an owned XML adapter.
 #![forbid(unsafe_code)]
 
-mod ast;
+pub mod ast;
 mod context;
 mod error;
 mod eval;
@@ -33,6 +33,10 @@ impl XPath {
             expression: parser::parse(source)?,
             source: source.into(),
         })
+    }
+    /// The compiled expression tree, read-only, for static analysis.
+    pub fn ast(&self) -> &ast::Expr {
+        &self.expression
     }
     pub fn source(&self) -> &str {
         &self.source
