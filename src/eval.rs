@@ -403,9 +403,16 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
             Axis::Namespace => NodeKind::Namespace,
             _ => NodeKind::Element,
         };
+        let keyed = self.key_run(step, &test);
         let mut result = Vec::new();
         for node in nodes {
             self.spend(1)?;
+            if let Some((name, keys)) = &keyed {
+                if let Some(found) = self.child_by_key(&node, name, keys, depth)? {
+                    result.extend(self.filter(found, &step.predicates[keys.len()..], depth)?);
+                    continue;
+                }
+            }
             let matching = match (&test, step.axis) {
                 (ResolvedTest::Name(name), Axis::Child) => self.children_named(&node, name)?,
                 _ => None,
@@ -423,6 +430,90 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
             result.extend(self.filter(matching, &step.predicates, depth)?);
         }
         Ok(self.normalize(result))
+    }
+
+    /// R2: the leading run of `[k = e]` predicates of a `child::name` step
+    /// that a keyed lookup can answer, as (key name, right-hand side) pairs.
+    ///
+    /// Each predicate must be `=` between a one-step relative `child::k` name
+    /// test without predicates and a context-independent expression (either
+    /// operand order). The first predicate of any other shape, including every
+    /// position-dependent one, ends the run. `None` if the run is empty.
+    fn key_run<'e>(
+        &self,
+        step: &'e Step,
+        test: &ResolvedTest,
+    ) -> Option<(ExpandedName, Vec<(ExpandedName, &'e Expr)>)> {
+        let ResolvedTest::Name(name) = test else {
+            return None;
+        };
+        if step.axis != Axis::Child {
+            return None;
+        }
+        let mut keys = Vec::new();
+        for predicate in &step.predicates {
+            let Expr::Binary(BinaryOp::Eq, left, right) = predicate else {
+                break;
+            };
+            let pair = match (key_child(left), key_child(right)) {
+                (Some(key), _) if context_independent(right) => (key, &**right),
+                (_, Some(key)) if context_independent(left) => (key, &**left),
+                _ => break,
+            };
+            // An unresolvable key prefix ends the run; ordinary evaluation
+            // then reports it exactly when it would have before.
+            match self.resolve_test(&NodeTest::Name(pair.0.clone()), Axis::Child) {
+                Ok(ResolvedTest::Name(key)) => keys.push((key, pair.1)),
+                _ => break,
+            }
+        }
+        (!keys.is_empty()).then(|| (name.clone(), keys))
+    }
+
+    /// R2: evaluate each key's right-hand side once against `node` and ask the
+    /// navigator for the entry. `None` means "scan normally": the hook is not
+    /// supported here, or a right-hand side failed (ordinary evaluation then
+    /// reports that failure only if it reaches it). The work budget spent on a
+    /// declined attempt is refunded so the fallback is indistinguishable.
+    fn child_by_key(
+        &mut self,
+        node: &N::Node,
+        name: &ExpandedName,
+        keys: &[(ExpandedName, &Expr)],
+        depth: usize,
+    ) -> Result<Option<Vec<N::Node>>> {
+        let nav = self.ctx.navigator;
+        if !matches!(nav.kind(node), NodeKind::Root | NodeKind::Element) {
+            return Ok(None);
+        }
+        let budget = self.remaining;
+        let focus = Focus {
+            node: node.clone(),
+            position: 1,
+            size: 1,
+        };
+        let mut values = Vec::with_capacity(keys.len());
+        for (key, rhs) in keys {
+            match self.expr(rhs, &focus, depth) {
+                Ok(value) => values.push((key.clone(), value)),
+                Err(_) => {
+                    self.remaining = budget;
+                    return Ok(None);
+                }
+            }
+        }
+        match nav.child_by_key(node, name, &values) {
+            None => {
+                self.remaining = budget;
+                Ok(None)
+            }
+            Some(None) => Ok(Some(Vec::new())),
+            Some(Some(found)) => {
+                self.spend(1)?;
+                nav.validate_node(&found)?;
+                Ok(Some(vec![found]))
+            }
+        }
     }
 
     /// R6: ask the navigator for the element children named `name`. `None`
@@ -638,6 +729,42 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
                 Ok(result)
             }
         }
+    }
+}
+
+/// `k` or `child::k`: a one-step relative child name test without predicates.
+fn key_child(expr: &Expr) -> Option<&QName> {
+    match expr {
+        Expr::Path {
+            base: None,
+            absolute: false,
+            steps,
+        } => match steps.as_slice() {
+            [Step {
+                axis: Axis::Child,
+                test: NodeTest::Name(name),
+                predicates,
+            }] if predicates.is_empty() => Some(name),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// A string or number literal, a variable, `current()`, or a path rooted at
+/// `current()`. `current()` is assumed to be the YANG function returning the
+/// context's initial node, so none of these depend on the predicate's focus.
+fn context_independent(expr: &Expr) -> bool {
+    fn is_current(expr: &Expr) -> bool {
+        matches!(expr, Expr::Function(name, args)
+            if name.prefix.is_none() && name.local == "current" && args.is_empty())
+    }
+    match expr {
+        Expr::String(_) | Expr::Number(_) | Expr::Variable(_) => true,
+        Expr::Path {
+            base: Some(base), ..
+        } => is_current(base),
+        other => is_current(other),
     }
 }
 

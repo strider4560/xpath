@@ -1,4 +1,4 @@
-use crate::Result;
+use crate::{Result, Value};
 use std::{cmp::Ordering, hash::Hash};
 
 /// XPath's seven node kinds. The document root is distinct from its element.
@@ -112,6 +112,29 @@ pub trait Navigator {
         _parent: &Self::Node,
         _name: &ExpandedName,
     ) -> Option<Vec<Self::Node>> {
+        None
+    }
+    /// Point lookup of the child element `name` of `parent` whose key children
+    /// equal the given values, used for a step `name[k1 = e1][k2 = e2]...`.
+    ///
+    /// Each entry of `keys` is a key child's expanded name and the value of its
+    /// context-independent right-hand side exactly as evaluated (a string,
+    /// number, boolean or node-set; not converted or canonicalized). The adapter
+    /// decides equality, for example by canonicalizing the value for the key's
+    /// type. Results must agree with XPath `=` semantics for the data it serves.
+    ///
+    /// Keys identify at most one entry: the evaluator applies any remaining
+    /// predicates to the returned entry alone, at position 1 of 1.
+    ///
+    /// Return `None` when the lookup is not supported here (the evaluator then
+    /// scans normally), `Some(None)` when no entry matches, and `Some(Some(n))`
+    /// for the matching entry. The default is `None`.
+    fn child_by_key(
+        &self,
+        _parent: &Self::Node,
+        _name: &ExpandedName,
+        _keys: &[(ExpandedName, Value<Self::Node>)],
+    ) -> Option<Option<Self::Node>> {
         None
     }
     /// Resolve an ID according to the embedding data model. Ordinary `id`
