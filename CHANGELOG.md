@@ -44,8 +44,11 @@ pass unchanged.
   XML adapter, all bundled tests) are unaffected; `name()`, `local-name()` and
   `namespace-uri()` still propagate errors.
 - The R2 fast path assumes `current()` is YANG's function returning the
-  context's initial node. Keys must identify at most one entry.
-- R4 (borrowed string values) is deferred: `string_value()` returns `String`; a `Cow<str>` or caller-supplied buffer would let leaf values come straight from the row.
+  context's initial node. `child_by_key` must decline (`None`) unless the
+  keys cover every key leaf exactly once.
+- R4 (borrowed string values) is deferred: `string_value()` returns
+  `String`; a `Cow<str>` or caller-supplied buffer would let leaf values come
+  straight from the row.
 
 ## 0.1.0
 

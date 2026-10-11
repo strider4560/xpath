@@ -123,8 +123,12 @@ pub trait Navigator {
     /// decides equality, for example by canonicalizing the value for the key's
     /// type. Results must agree with XPath `=` semantics for the data it serves.
     ///
-    /// Keys identify at most one entry: the evaluator applies any remaining
-    /// predicates to the returned entry alone, at position 1 of 1.
+    /// The evaluator treats the answer as the only candidate: it applies any
+    /// remaining predicates to the returned entry alone, at position 1 of 1.
+    /// So the navigator must answer only when `keys` determine at most one
+    /// entry: it must return `None` (decline) when `keys` do not cover every
+    /// key leaf of the list or name a key leaf more than once, and the
+    /// evaluator then falls back to a scan.
     ///
     /// Return `None` when the lookup is not supported here (the evaluator then
     /// scans normally), `Some(None)` when no entry matches, and `Some(Some(n))`
