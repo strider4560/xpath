@@ -182,3 +182,22 @@ child lookup is worth measuring with the actual YANG store. Descendant queries
 still traverse and materialize intermediate sets, and relational node-set
 comparisons still have a Cartesian-product comparison loop. Those remain
 opportunities; this pass does not claim to optimize them or measure database I/O.
+
+## Embedding hooks (0.2.0, D21)
+
+Version 0.2.0 adds the navigator hooks that the list-key paragraph above asks
+for: `name_matches` (R3, name tests without an owned name per candidate),
+`children_named` (R6, `parent/leaf` without loading every child) and
+`child_by_key` (R2, `list[key = e]` as one point lookup instead of a scan), plus
+reusable contexts (R5: `Context::set_node` and a shared `FunctionTable`). Their
+defaults keep the measurements above valid for adapters that do not implement
+them; the bundled XML adapter does not. Their benefit depends on the adapter and
+is to be measured with the actual YANG store, not in this suite. The tests in
+`tests/embedding.rs` assert their call counts (one keyed lookup and no list
+enumeration for `a/b[c = 'x']`; no `children()` call for `a/b/d` with
+`children_named`).
+
+**R4 is deferred.** The fifth hook of D21 (§12.8 of the yang-rs design) is not
+part of 0.2.0; descendant traversal and relational node-set comparisons remain
+as described above.
+

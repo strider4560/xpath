@@ -91,6 +91,14 @@ other functions without adding them to the XPath 1.0 builtin library.
 Core functions cannot be overridden. `examples/yang.rs` demonstrates module
 namespaces and `current()` in a predicate.
 
+To reuse registrations, build a `FunctionTable` once and attach it with
+`with_functions(&table)` (per-context `with_function` entries shadow it), and
+re-focus one context across many evaluations with `set_node`. Storage-backed
+navigators can override `name_matches`, `children_named` and `child_by_key` to
+answer name tests, `parent/leaf` and `list[key = value]` steps without scanning;
+`XPath::ast()` exposes the compiled `ast::Expr` for static analysis. See
+`CHANGELOG.md` for the exact contracts.
+
 The YANG library remains responsible for the accessible tree, `when` dummy-node
 rules, schema/default handling, identity and leafref resolution, and the YANG
 extension-function semantics. Evaluate a `must` or `when` result with
