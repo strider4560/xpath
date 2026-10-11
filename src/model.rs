@@ -90,6 +90,30 @@ pub trait Navigator {
     }
     fn string_value(&self, node: &Self::Node) -> Result<String>;
     fn compare_document_order(&self, a: &Self::Node, b: &Self::Node) -> Ordering;
+    /// Does `node`'s expanded name equal `name`? Used by the evaluator for every
+    /// name test, so an adapter can compare against its stored name without
+    /// allocating an owned [`ExpandedName`] per candidate.
+    ///
+    /// The default compares [`name`](Self::name) to `name`; a name that cannot
+    /// be read does not match. Override it to compare in place. It must agree
+    /// with `name` for every node.
+    fn name_matches(&self, node: &Self::Node, name: &ExpandedName) -> bool {
+        matches!(self.name(node), Ok(Some(ref actual)) if actual == name)
+    }
+    /// The children of `parent` whose expanded name is `name`, in document
+    /// order, or `None` if the adapter cannot answer without a scan.
+    ///
+    /// The evaluator asks this first for a `child::name` step and falls back to
+    /// [`children`](Self::children) plus [`name_matches`](Self::name_matches)
+    /// on `None`. `Some` must contain exactly the element children that a scan
+    /// would select. The default is `None`.
+    fn children_named(
+        &self,
+        _parent: &Self::Node,
+        _name: &ExpandedName,
+    ) -> Option<Vec<Self::Node>> {
+        None
+    }
     /// Resolve an ID according to the embedding data model. Ordinary `id`
     /// attributes are not automatically XML IDs.
     fn element_by_id(&self, _context: &Self::Node, _id: &str) -> Result<Option<Self::Node>> {

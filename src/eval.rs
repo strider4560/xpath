@@ -406,13 +406,46 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
         let mut result = Vec::new();
         for node in nodes {
             self.spend(1)?;
-            let mut matching = self.axis(&node, step.axis)?;
-            retain_nodes(&mut matching, |candidate, _, _| {
-                self.matches(candidate, &test, principal)
-            })?;
+            let matching = match (&test, step.axis) {
+                (ResolvedTest::Name(name), Axis::Child) => self.children_named(&node, name)?,
+                _ => None,
+            };
+            let matching = match matching {
+                Some(matching) => matching,
+                None => {
+                    let mut matching = self.axis(&node, step.axis)?;
+                    retain_nodes(&mut matching, |candidate, _, _| {
+                        self.matches(candidate, &test, principal)
+                    })?;
+                    matching
+                }
+            };
             result.extend(self.filter(matching, &step.predicates, depth)?);
         }
         Ok(self.normalize(result))
+    }
+
+    /// R6: ask the navigator for the element children named `name`. `None`
+    /// means the caller scans `children()` with `name_matches` instead.
+    fn children_named(
+        &mut self,
+        node: &N::Node,
+        name: &ExpandedName,
+    ) -> Result<Option<Vec<N::Node>>> {
+        let nav = self.ctx.navigator;
+        if !matches!(nav.kind(node), NodeKind::Root | NodeKind::Element) {
+            return Ok(Some(Vec::new()));
+        }
+        let Some(mut children) = nav.children_named(node, name) else {
+            return Ok(None);
+        };
+        self.spend(children.len())?;
+        for child in &children {
+            nav.validate_node(child)?;
+        }
+        // Element children only, as the principal-kind test of a scan requires.
+        children.retain(|child| nav.kind(child) == NodeKind::Element);
+        Ok(Some(children))
     }
 
     fn resolve_test(&self, test: &NodeTest, axis: Axis) -> Result<ResolvedTest> {
@@ -438,7 +471,7 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
         let kind = nav.kind(node);
         Ok(match test {
             ResolvedTest::Any => kind == principal,
-            ResolvedTest::Name(name) => kind == principal && nav.name(node)?.as_ref() == Some(name),
+            ResolvedTest::Name(name) => kind == principal && nav.name_matches(node, name),
             ResolvedTest::Namespace(uri) => {
                 kind == principal && nav.name(node)?.is_some_and(|n| n.namespace_uri == *uri)
             }
