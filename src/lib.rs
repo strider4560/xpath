@@ -16,7 +16,7 @@ mod value;
 #[cfg(feature = "xml")]
 pub mod xml;
 
-pub use context::{Context, FunctionContext, Limits};
+pub use context::{Context, FunctionContext, FunctionTable, Limits};
 pub use error::{Error, ErrorKind, Result};
 pub use model::{Axis, ExpandedName, Navigator, NodeKind};
 pub use value::Value;

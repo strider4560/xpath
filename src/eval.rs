@@ -168,7 +168,7 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
                         return self.canonicalize(result?);
                     }
                 }
-                let function = self.ctx.functions.get(&name).ok_or_else(|| {
+                let function = self.ctx.function(&name).ok_or_else(|| {
                     Error::new(
                         ErrorKind::Function,
                         format!("unknown function: {}", q.local),

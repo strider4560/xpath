@@ -1,5 +1,8 @@
 use crate::{Error, ErrorKind, ExpandedName, Navigator, Result, Value};
-use std::{collections::BTreeMap, rc::Rc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    rc::Rc,
+};
 
 /// Work limits for the evaluator. Extension callbacks must enforce their own limits.
 #[derive(Debug, Clone, Copy)]
@@ -30,13 +33,44 @@ pub struct FunctionContext<'a, N: Navigator> {
     pub size: usize,
 }
 
-type Function<'a, N> = Rc<
-    dyn for<'b> Fn(
-            &FunctionContext<'b, N>,
-            &[Value<<N as Navigator>::Node>],
-        ) -> Result<Value<<N as Navigator>::Node>>
-        + 'a,
->;
+type DynFunction<'a, N> = dyn for<'b> Fn(
+        &FunctionContext<'b, N>,
+        &[Value<<N as Navigator>::Node>],
+    ) -> Result<Value<<N as Navigator>::Node>>
+    + 'a;
+type Function<'a, N> = Rc<DynFunction<'a, N>>;
+
+type SharedFunction<N> = Box<DynFunction<'static, N>>;
+
+/// Extension functions registered once and shared by many contexts through
+/// [`Context::with_functions`], instead of re-registering closures per context.
+pub struct FunctionTable<N: Navigator> {
+    functions: HashMap<ExpandedName, SharedFunction<N>>,
+}
+impl<N: Navigator> FunctionTable<N> {
+    pub fn new() -> Self {
+        Self {
+            functions: HashMap::new(),
+        }
+    }
+    /// Register (or replace) the function `name`.
+    pub fn insert<F>(&mut self, name: ExpandedName, function: F) -> &mut Self
+    where
+        F: for<'b> Fn(&FunctionContext<'b, N>, &[Value<N::Node>]) -> Result<Value<N::Node>>
+            + 'static,
+    {
+        self.functions.insert(name, Box::new(function));
+        self
+    }
+    pub(crate) fn get(&self, name: &ExpandedName) -> Option<&SharedFunction<N>> {
+        self.functions.get(name)
+    }
+}
+impl<N: Navigator> Default for FunctionTable<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Namespace, variable and function bindings for one evaluation.
 ///
@@ -51,6 +85,7 @@ pub struct Context<'a, N: Navigator> {
     pub(crate) default_element_namespace: String,
     pub(crate) variables: BTreeMap<ExpandedName, Value<N::Node>>,
     pub(crate) functions: BTreeMap<ExpandedName, Function<'a, N>>,
+    pub(crate) shared_functions: Option<&'a FunctionTable<N>>,
     pub(crate) limits: Limits,
 }
 impl<'a, N: Navigator> Context<'a, N> {
@@ -64,6 +99,7 @@ impl<'a, N: Navigator> Context<'a, N> {
             default_element_namespace: String::new(),
             variables: BTreeMap::new(),
             functions: BTreeMap::new(),
+            shared_functions: None,
             limits: Limits::default(),
         }
     }
@@ -93,6 +129,27 @@ impl<'a, N: Navigator> Context<'a, N> {
     {
         self.functions.insert(name, Rc::new(function));
         self
+    }
+    /// Use a shared [`FunctionTable`]. Functions added with
+    /// [`with_function`](Self::with_function) shadow table entries of the same
+    /// name; core XPath functions shadow both.
+    pub fn with_functions(mut self, table: &'a FunctionTable<N>) -> Self {
+        self.shared_functions = Some(table);
+        self
+    }
+    /// Re-focus this context on `node` at position 1 of 1, keeping its
+    /// namespace, variable and function bindings and limits, so one context
+    /// can serve many evaluations.
+    pub fn set_node(&mut self, node: N::Node) {
+        self.node = node;
+        self.position = 1;
+        self.size = 1;
+    }
+    pub(crate) fn function(&self, name: &ExpandedName) -> Option<&DynFunction<'a, N>> {
+        if let Some(function) = self.functions.get(name) {
+            return Some(&**function);
+        }
+        Some(&**self.shared_functions?.get(name)?)
     }
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;

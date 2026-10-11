@@ -299,9 +299,8 @@ fn keyed_lookup_answers_list_key_predicate() {
 fn keyed_lookup_accepts_variables_and_current() {
     use counting::Rows;
     use xpath1::{ExpandedName, FunctionContext};
-    let current = |f: &FunctionContext<'_, Rows>, _: &[Value<usize>]| {
-        Ok(Value::Nodes(vec![f.initial_node.clone()]))
-    };
+    let current =
+        |f: &FunctionContext<'_, Rows>, _: &[Value<usize>]| Ok(Value::Nodes(vec![*f.initial_node]));
     for keyed in [true, false] {
         let nav = Rows::new(keyed, false);
         let ctx = Context::new(&nav, 0).with_variable("k", Value::String("y".into()));
@@ -391,4 +390,133 @@ fn keyed_lookup_fallback_and_children_named() {
     assert_eq!(nav.calls.children.get(), 0);
     assert_eq!(nav.calls.name_matches.get(), 0);
     assert_eq!(nav.calls.children_named.get(), 2 + KEYS.len());
+}
+
+// (d) R5: one context re-focused with set_node serves many evaluations, with
+// results equal to fresh contexts, keeping variables, namespaces and functions.
+#[test]
+fn set_node_reuses_one_context() {
+    use counting::Rows;
+    use xpath1::{ExpandedName, FunctionTable};
+    let nav = Rows::new(true, true);
+    let mut table = FunctionTable::new();
+    table.insert(ExpandedName::new("urn:f", "twice"), |_, args| {
+        Ok(Value::Number(
+            2.0 * args[0].to_number(&Rows::new(false, false))?,
+        ))
+    });
+    let expr = XPath::compile(
+        "concat(string(.), '|', count(../b[c = $k]), '|', f:twice(count(d)), '|', position(), '/', last())",
+    )
+    .unwrap();
+    let build = |node| {
+        Context::new(&nav, node)
+            .with_namespace("f", "urn:f")
+            .with_variable("k", Value::String("y".into()))
+            .with_functions(&table)
+    };
+    // Start from a context with a non-default focus: set_node resets it.
+    let mut reused = build(2).with_focus(2, 3).unwrap();
+    let nodes: Vec<usize> = (0..14).collect();
+    for i in 0..1000 {
+        let node = nodes[i % nodes.len()];
+        reused.set_node(node);
+        let got = expr.evaluate(&reused).unwrap();
+        let want = expr.evaluate(&build(node)).unwrap();
+        assert_eq!(got, want, "node {node}");
+    }
+    reused.set_node(8);
+    assert_eq!(
+        expr.evaluate(&reused).unwrap(),
+        Value::String("|1|2|1/1".into())
+    );
+}
+
+// (e) R5: a shared FunctionTable is callable from many contexts, and a
+// per-context with_function shadows it. Works for a navigator that borrows.
+#[test]
+fn function_table_is_shared_and_shadowed() {
+    use xpath1::{ExpandedName, FunctionTable, Navigator};
+    struct Borrowed<'s>(&'s Document);
+    impl Navigator for Borrowed<'_> {
+        type Node = <Document as Navigator>::Node;
+        fn kind(&self, n: &Self::Node) -> xpath1::NodeKind {
+            self.0.kind(n)
+        }
+        fn parent(&self, n: &Self::Node) -> xpath1::Result<Option<Self::Node>> {
+            self.0.parent(n)
+        }
+        fn children<'a>(
+            &'a self,
+            n: &'a Self::Node,
+        ) -> impl Iterator<Item = xpath1::Result<Self::Node>> + 'a {
+            self.0.children(n)
+        }
+        fn name(&self, n: &Self::Node) -> xpath1::Result<Option<ExpandedName>> {
+            self.0.name(n)
+        }
+        fn string_value(&self, n: &Self::Node) -> xpath1::Result<String> {
+            self.0.string_value(n)
+        }
+        fn compare_document_order(&self, a: &Self::Node, b: &Self::Node) -> std::cmp::Ordering {
+            self.0.compare_document_order(a, b)
+        }
+    }
+
+    let doc = Document::parse("<r><x>1</x><x>2</x></r>").unwrap();
+    let nav = Borrowed(&doc);
+    let mut table: FunctionTable<Borrowed<'_>> = FunctionTable::new();
+    table
+        .insert(ExpandedName::local("current"), |f, _| {
+            Ok(Value::Nodes(vec![*f.initial_node]))
+        })
+        .insert(ExpandedName::local("which"), |_, _| {
+            Ok(Value::String("table".into()))
+        });
+    let which = XPath::compile("which()").unwrap();
+    let current = XPath::compile("count(current()/x)").unwrap();
+    let root = XPath::compile("/r")
+        .unwrap()
+        .select(&Context::new(&nav, doc.root()))
+        .unwrap();
+
+    {
+        let shared_a = Context::new(&nav, root[0]).with_functions(&table);
+        let shared_b = Context::new(&nav, doc.root()).with_functions(&table);
+        assert_eq!(
+            which.evaluate(&shared_a).unwrap(),
+            Value::String("table".into())
+        );
+        assert_eq!(current.evaluate(&shared_a).unwrap(), Value::Number(2.0));
+        assert_eq!(current.evaluate(&shared_b).unwrap(), Value::Number(0.0));
+
+        // with_function shadows the table, in either builder order.
+        let local = |_: &xpath1::FunctionContext<'_, Borrowed<'_>>, _: &[Value<_>]| {
+            Ok(Value::String("local".into()))
+        };
+        let after = Context::new(&nav, root[0])
+            .with_functions(&table)
+            .with_function(ExpandedName::local("which"), local);
+        let before = Context::new(&nav, root[0])
+            .with_function(ExpandedName::local("which"), local)
+            .with_functions(&table);
+        for ctx in [&after, &before] {
+            assert_eq!(which.evaluate(ctx).unwrap(), Value::String("local".into()));
+            // Unshadowed table entries remain callable.
+            assert_eq!(current.evaluate(ctx).unwrap(), Value::Number(2.0));
+        }
+    }
+    // Core functions are not overridable by either.
+    table.insert(ExpandedName::local("count"), |_, _| Ok(Value::Number(-1.0)));
+    let ctx = Context::new(&nav, root[0]).with_functions(&table);
+    assert_eq!(
+        XPath::compile("count(x)").unwrap().evaluate(&ctx).unwrap(),
+        Value::Number(2.0)
+    );
+    // Without the table the function is unknown.
+    let bare = Context::new(&nav, root[0]);
+    assert_eq!(
+        which.evaluate(&bare).unwrap_err().kind,
+        xpath1::ErrorKind::Function
+    );
 }
