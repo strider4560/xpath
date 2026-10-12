@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.0 — 2026-10-12
+
+Shared per-read namespace bindings (WP9). Backwards compatible; no `Navigator`
+changes. Evaluation results are unchanged; the Jaxen corpus (296 assertion
+definitions) and the libxml2 differential pass unchanged.
+
+### Added
+
+- **`Namespaces`** (`new`, `with_namespace`, `with_default_element_namespace`,
+  `namespace`, `default_element_namespace`, `Default`): an immutable binding set
+  shared by many contexts through `Context::with_namespaces(&'a Namespaces)`.
+  Resolution order: `xml` is always the XML namespace; other prefixes resolve
+  through the context's own `with_namespace` bindings, then the shared set. The
+  default element namespace is the context's own if non-empty, else the shared
+  set's. The set caches every resolved name (`Rc<ExpandedName>`), so a warm
+  evaluation resolves name tests, variables and function names without
+  allocating. **Cache rule:** the cache is read and written only when the
+  context's own namespace map and own default element namespace are both empty
+  (every lookup went through the shared set), so a context layering its own
+  bindings never poisons it. `Namespaces` is not `Send`/`Sync`; use one per
+  thread (typically one per read).
+- `ast::QName` derives `Hash`.
+
 ## 0.2.0 — 2026-10-11
 
 Embedding hooks for application-backed (row/cursor) navigators (D21). All

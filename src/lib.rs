@@ -11,6 +11,7 @@ mod error;
 mod eval;
 mod functions;
 mod model;
+pub mod namespaces;
 mod parser;
 mod value;
 #[cfg(feature = "xml")]
@@ -19,6 +20,7 @@ pub mod xml;
 pub use context::{Context, FunctionContext, FunctionTable, Limits};
 pub use error::{Error, ErrorKind, Result};
 pub use model::{Axis, ExpandedName, Navigator, NodeKind};
+pub use namespaces::Namespaces;
 pub use value::Value;
 
 /// An immutable compiled XPath expression, reusable with different data and bindings.

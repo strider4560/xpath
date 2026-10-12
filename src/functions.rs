@@ -406,7 +406,7 @@ mod tests {
         };
         for name in ["name", "local-name", "namespace-uri"] {
             assert_eq!(
-                call(name, &[nodes.clone()], &ctx, &mut 100_000)
+                call(name, std::slice::from_ref(&nodes), &ctx, &mut 100_000)
                     .unwrap()
                     .unwrap_err(),
                 expected

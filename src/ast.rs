@@ -8,7 +8,7 @@
 use crate::Axis;
 
 /// A lexical QName as written in the expression; the prefix is not yet resolved.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct QName {
     pub prefix: Option<String>,

@@ -2,10 +2,10 @@ use crate::{
     ast::{BinaryOp, Expr, NodeTest, QName, Step},
     functions,
     value::string_to_number,
-    Axis, Context, Error, ErrorKind, ExpandedName, FunctionContext, Navigator, NodeKind, Result,
-    Value,
+    Axis, Context, Error, ErrorKind, ExpandedName, FunctionContext, Namespaces, Navigator,
+    NodeKind, Result, Value,
 };
-use std::{cmp::Ordering, collections::HashSet};
+use std::{cmp::Ordering, collections::HashSet, rc::Rc};
 
 struct Focus<N> {
     node: N,
@@ -89,26 +89,69 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
         }
     }
 
-    fn namespace(&self, prefix: &str) -> Result<String> {
+    fn namespace(&self, prefix: &str) -> Result<&str> {
         if prefix == "xml" {
-            return Ok("http://www.w3.org/XML/1998/namespace".into());
+            return Ok(XML_NAMESPACE);
         }
-        self.ctx.namespaces.get(prefix).cloned().ok_or_else(|| {
-            Error::new(
-                ErrorKind::Namespace,
-                format!("unbound namespace prefix: {prefix}"),
-            )
+        if let Some(uri) = self.ctx.namespaces.get(prefix) {
+            return Ok(uri);
+        }
+        self.ctx
+            .shared_namespaces
+            .and_then(|shared| shared.namespace(prefix))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::Namespace,
+                    format!("unbound namespace prefix: {prefix}"),
+                )
+            })
+    }
+
+    /// The shared set whose cache this evaluation may read and write: only
+    /// when the context has no bindings of its own, so every resolution went
+    /// through the shared set alone.
+    fn cache(&self) -> Option<&Namespaces> {
+        self.ctx.shared_namespaces.filter(|_| {
+            self.ctx.namespaces.is_empty() && self.ctx.default_element_namespace.is_empty()
         })
     }
 
-    fn name(&self, name: &QName) -> Result<ExpandedName> {
-        Ok(ExpandedName::new(
+    /// Resolve a QName; an unprefixed name is in the null namespace.
+    fn name(&self, name: &QName) -> Result<Rc<ExpandedName>> {
+        let cache = self.cache();
+        if let Some(found) = cache.and_then(|cache| cache.cached(name)) {
+            return Ok(found);
+        }
+        let resolved = Rc::new(ExpandedName::new(
             match &name.prefix {
                 Some(p) => self.namespace(p)?,
-                None => String::new(),
+                None => "",
             },
             &name.local,
-        ))
+        ));
+        if let Some(cache) = cache {
+            cache.cache(name, resolved.clone());
+        }
+        Ok(resolved)
+    }
+
+    /// Resolve an unprefixed element test in the default element namespace.
+    fn element_name(&self, local: &str) -> Rc<ExpandedName> {
+        let cache = self.cache();
+        if let Some(found) = cache.and_then(|cache| cache.cached_element(local)) {
+            return found;
+        }
+        let default = match self.ctx.shared_namespaces {
+            Some(shared) if self.ctx.default_element_namespace.is_empty() => {
+                shared.default_element_namespace()
+            }
+            _ => &self.ctx.default_element_namespace,
+        };
+        let resolved = Rc::new(ExpandedName::new(default, local));
+        if let Some(cache) = cache {
+            cache.cache_element(local, resolved.clone());
+        }
+        resolved
     }
 
     fn expr(
@@ -132,7 +175,7 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
             Expr::Number(n) => Ok(Value::Number(*n)),
             Expr::Variable(q) => {
                 let name = self.name(q)?;
-                let value = self.ctx.variables.get(&name).ok_or_else(|| {
+                let value = self.ctx.variables.get(&*name).ok_or_else(|| {
                     Error::new(
                         ErrorKind::Variable,
                         format!("unbound variable: {}", q.local),
@@ -439,11 +482,7 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
     /// test without predicates and a context-independent expression (either
     /// operand order). The first predicate of any other shape, including every
     /// position-dependent one, ends the run. `None` if the run is empty.
-    fn key_run<'e>(
-        &self,
-        step: &'e Step,
-        test: &ResolvedTest,
-    ) -> Option<(ExpandedName, Vec<(ExpandedName, &'e Expr)>)> {
+    fn key_run<'e>(&self, step: &'e Step, test: &ResolvedTest) -> Option<KeyRun<'e>> {
         let ResolvedTest::Name(name) = test else {
             return None;
         };
@@ -462,9 +501,9 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
             };
             // An unresolvable key prefix ends the run; ordinary evaluation
             // then reports it exactly when it would have before.
-            match self.resolve_test(&NodeTest::Name(pair.0.clone()), Axis::Child) {
-                Ok(ResolvedTest::Name(key)) => keys.push((key, pair.1)),
-                _ => break,
+            match self.test_name(pair.0, Axis::Child) {
+                Ok(key) => keys.push((key, pair.1)),
+                Err(_) => break,
             }
         }
         (!keys.is_empty()).then(|| (name.clone(), keys))
@@ -479,7 +518,7 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
         &mut self,
         node: &N::Node,
         name: &ExpandedName,
-        keys: &[(ExpandedName, &Expr)],
+        keys: &[(Rc<ExpandedName>, &Expr)],
         depth: usize,
     ) -> Result<Option<Vec<N::Node>>> {
         let nav = self.ctx.navigator;
@@ -495,7 +534,7 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
         let mut values = Vec::with_capacity(keys.len());
         for (key, rhs) in keys {
             match self.expr(rhs, &focus, depth + 1) {
-                Ok(value) => values.push((key.clone(), value)),
+                Ok(value) => values.push((ExpandedName::clone(key), value)),
                 Err(_) => {
                     self.remaining = budget;
                     return Ok(None);
@@ -539,17 +578,21 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
         Ok(Some(children))
     }
 
+    /// The expanded name of a name test on `axis`: unprefixed element tests
+    /// take the default element namespace.
+    fn test_name(&self, name: &QName, axis: Axis) -> Result<Rc<ExpandedName>> {
+        if name.prefix.is_none() && !matches!(axis, Axis::Attribute | Axis::Namespace) {
+            Ok(self.element_name(&name.local))
+        } else {
+            self.name(name)
+        }
+    }
+
     fn resolve_test(&self, test: &NodeTest, axis: Axis) -> Result<ResolvedTest> {
         Ok(match test {
             NodeTest::Any => ResolvedTest::Any,
-            NodeTest::Name(n) => ResolvedTest::Name(
-                if n.prefix.is_none() && !matches!(axis, Axis::Attribute | Axis::Namespace) {
-                    ExpandedName::new(&self.ctx.default_element_namespace, &n.local)
-                } else {
-                    self.name(n)?
-                },
-            ),
-            NodeTest::NamespaceWildcard(p) => ResolvedTest::Namespace(self.namespace(p)?),
+            NodeTest::Name(n) => ResolvedTest::Name(self.test_name(n, axis)?),
+            NodeTest::NamespaceWildcard(p) => ResolvedTest::Namespace(self.namespace(p)?.into()),
             NodeTest::Node => ResolvedTest::Node,
             NodeTest::Text => ResolvedTest::Kind(NodeKind::Text),
             NodeTest::Comment => ResolvedTest::Kind(NodeKind::Comment),
@@ -768,9 +811,15 @@ fn context_independent(expr: &Expr) -> bool {
     }
 }
 
+/// A keyed `child::name` step: the step's name and its (key name, right-hand
+/// side) pairs.
+type KeyRun<'e> = (Rc<ExpandedName>, Vec<(Rc<ExpandedName>, &'e Expr)>);
+
+const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
+
 enum ResolvedTest {
     Any,
-    Name(ExpandedName),
+    Name(Rc<ExpandedName>),
     Namespace(String),
     Node,
     Kind(NodeKind),

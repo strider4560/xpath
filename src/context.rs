@@ -1,4 +1,4 @@
-use crate::{Error, ErrorKind, ExpandedName, Navigator, Result, Value};
+use crate::{Error, ErrorKind, ExpandedName, Namespaces, Navigator, Result, Value};
 use std::{
     collections::{BTreeMap, HashMap},
     rc::Rc,
@@ -83,6 +83,7 @@ pub struct Context<'a, N: Navigator> {
     pub(crate) size: usize,
     pub(crate) namespaces: BTreeMap<String, String>,
     pub(crate) default_element_namespace: String,
+    pub(crate) shared_namespaces: Option<&'a Namespaces>,
     pub(crate) variables: BTreeMap<ExpandedName, Value<N::Node>>,
     pub(crate) functions: BTreeMap<ExpandedName, Function<'a, N>>,
     pub(crate) shared_functions: Option<&'a FunctionTable<N>>,
@@ -97,6 +98,7 @@ impl<'a, N: Navigator> Context<'a, N> {
             size: 1,
             namespaces: BTreeMap::new(),
             default_element_namespace: String::new(),
+            shared_namespaces: None,
             variables: BTreeMap::new(),
             functions: BTreeMap::new(),
             shared_functions: None,
@@ -114,6 +116,18 @@ impl<'a, N: Navigator> Context<'a, N> {
     /// functions, or explicitly prefixed names.
     pub fn with_default_element_namespace(mut self, uri: impl Into<String>) -> Self {
         self.default_element_namespace = uri.into();
+        self
+    }
+    /// Resolve names through a shared [`Namespaces`] set as well.
+    ///
+    /// The `xml` prefix is always bound to its fixed URI; other prefixes
+    /// resolve through this context's own [`with_namespace`](Self::with_namespace)
+    /// bindings first, then the shared set. The default element namespace is
+    /// this context's own if set, else the shared set's. When the context has
+    /// no bindings of its own, resolved names come from (and are added to) the
+    /// set's cache, so warm evaluations resolve names without allocating.
+    pub fn with_namespaces(mut self, namespaces: &'a Namespaces) -> Self {
+        self.shared_namespaces = Some(namespaces);
         self
     }
     pub fn with_variable(self, name: impl Into<String>, value: Value<N::Node>) -> Self {
