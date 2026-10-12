@@ -2,8 +2,8 @@
 
 ## 0.3.0 — 2026-10-12
 
-Shared per-read namespace bindings (WP9). Backwards compatible; no `Navigator`
-changes. Evaluation results are unchanged; the Jaxen corpus (296 assertion
+Shared per-read namespace bindings and an opt-in node-set buffer pool (WP9).
+Backwards compatible; no `Navigator` changes. Evaluation results are unchanged; the Jaxen corpus (296 assertion
 definitions) and the libxml2 differential pass unchanged.
 
 ### Added
@@ -25,6 +25,25 @@ definitions) and the libxml2 differential pass unchanged.
   name per evaluation. Namespace-wildcard (`p:*`) and processing-instruction
   target tests borrow their URI and target instead of allocating.
 - `ast::QName` derives `Hash`.
+- **`NodeSetPool<T>`** (`new`, `take`, `give`, `len`, `is_empty`, `Default`,
+  `Debug`) and **`Context::with_pool(&'a NodeSetPool<N::Node>)`**: an opt-in
+  pool of empty node-set buffers. With a pool, the evaluator takes every
+  intermediate node-set vector (step results, axis scans, predicate and
+  operand node-sets, variable copies, union merges) from it and gives it back
+  when done, so warm evaluations reuse capacity instead of allocating. The
+  node-set an evaluation returns is always owned by the caller; a host may
+  `give` it back once finished. Vectors returned by `Navigator::children_named`
+  and node-sets returned by extension functions are given to the pool after
+  use, so a navigator or function that builds them from the same pool has them
+  recycled. `give` clears the vector and keeps its capacity; it drops vectors
+  without capacity and any vector given while the pool holds 64. Not `Sync`;
+  use one per thread. Without a pool, behavior and allocations
+  are as before.
+
+### Changed
+
+- `xml::Document` overrides `Navigator::name_matches` to compare the stored
+  name in place instead of cloning an `ExpandedName` per candidate.
 
 ## 0.2.0 — 2026-10-11
 

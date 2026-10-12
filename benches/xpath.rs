@@ -178,6 +178,51 @@ fn xml(c: &mut Criterion) {
     });
 }
 
+/// The source of the `pool` group's document: 1000 `c` entries, one keyed `x`.
+#[cfg(feature = "xml")]
+fn pool_document() -> String {
+    let mut source = String::from("<a><b>");
+    for index in 0..1000 {
+        let key = if index == 500 {
+            "x".to_string()
+        } else {
+            format!("k{index}")
+        };
+        source.push_str(&format!("<c><d>{key}</d><e>{index}</e></c>"));
+    }
+    source.push_str("</b></a>");
+    source
+}
+
+#[cfg(feature = "xml")]
+fn pool(c: &mut Criterion) {
+    use xpath1::{xml::Document, Namespaces, NodeSetPool};
+    let document = Document::parse(&pool_document()).unwrap();
+    let expression = XPath::compile("/a/b/c[d = 'x']/e").unwrap();
+    // Both lines resolve names through a warm shared set, so they differ
+    // only in where node-set buffers come from.
+    let namespaces = Namespaces::new();
+    let pool = NodeSetPool::new();
+    let mut group = c.benchmark_group("pool");
+    for (name, pooled) in [("without", false), ("with", true)] {
+        let mut context = Context::new(&document, document.root()).with_namespaces(&namespaces);
+        if pooled {
+            context = context.with_pool(&pool);
+        }
+        assert_eq!(expression.select(&context).unwrap().len(), 1);
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let nodes = black_box(&expression).select(black_box(&context)).unwrap();
+                // A host reusing the pool gives the owned result back.
+                if pooled {
+                    pool.give(nodes);
+                }
+            })
+        });
+    }
+    group.finish();
+}
+
 fn counts() {
     println!("case,name_calls,string_calls,order_calls,child_nodes");
     let tree = Tree::interfaces(1000);
@@ -230,5 +275,7 @@ fn main() {
     comparisons(&mut criterion);
     #[cfg(feature = "xml")]
     xml(&mut criterion);
+    #[cfg(feature = "xml")]
+    pool(&mut criterion);
     criterion.final_summary();
 }

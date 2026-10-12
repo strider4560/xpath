@@ -65,6 +65,26 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
         Ok(())
     }
 
+    /// An empty node-set buffer, from the context's pool if it has one.
+    fn take(&self) -> Vec<N::Node> {
+        self.ctx.pool.map(|pool| pool.take()).unwrap_or_default()
+    }
+
+    /// Give a finished intermediate buffer back to the pool (or drop it).
+    fn give(&self, buffer: Vec<N::Node>) {
+        if let Some(pool) = self.ctx.pool {
+            pool.give(buffer);
+        }
+    }
+
+    /// Give back a discarded value's node-set buffer, if it has one.
+    fn give_value(&self, value: Value<N::Node>) {
+        if let Value::Nodes(nodes) = value {
+            self.give(nodes);
+        }
+    }
+
+    /// Sorts and deduplicates in place, in the buffer it was given.
     fn normalize(&self, mut nodes: Vec<N::Node>) -> Vec<N::Node> {
         // The navigator promises a total order consistent with node identity.
         // Sorting groups duplicate handles without hashing/cloning each one or
@@ -190,7 +210,15 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
                         ));
                     }
                 }
-                self.canonicalize(value.clone())
+                let value = match value {
+                    Value::Nodes(nodes) => {
+                        let mut copy = self.take();
+                        copy.extend_from_slice(nodes);
+                        Value::Nodes(copy)
+                    }
+                    other => other.clone(),
+                };
+                self.canonicalize(value)
             }
             Expr::Function(q, arguments) => {
                 let name = self.name(q)?;
@@ -205,32 +233,42 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
                     position: focus.position,
                     size: focus.size,
                 };
-                if name.namespace_uri.is_empty() {
-                    if let Some(result) =
-                        functions::call(&name.local_name, &args, &call_context, &mut self.remaining)
-                    {
-                        return self.canonicalize(result?);
+                let core = if name.namespace_uri.is_empty() {
+                    functions::call(&name.local_name, &args, &call_context, &mut self.remaining)
+                } else {
+                    None
+                };
+                let result = match core {
+                    Some(result) => result,
+                    None => {
+                        let function = self.ctx.function(&name).ok_or_else(|| {
+                            Error::new(
+                                ErrorKind::Function,
+                                format!("unknown function: {}", q.local),
+                            )
+                        })?;
+                        function(&call_context, &args)
                     }
+                };
+                for argument in args {
+                    self.give_value(argument);
                 }
-                let function = self.ctx.function(&name).ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::Function,
-                        format!("unknown function: {}", q.local),
-                    )
-                })?;
-                self.canonicalize(function(&call_context, &args)?)
+                self.canonicalize(result?)
             }
-            Expr::Unary(inner) => Ok(Value::Number(
-                -self
-                    .expr(inner, focus, depth + 1)?
-                    .to_number(self.ctx.navigator)?,
-            )),
+            Expr::Unary(inner) => {
+                let value = self.expr(inner, focus, depth + 1)?;
+                let number = value.to_number(self.ctx.navigator);
+                self.give_value(value);
+                Ok(Value::Number(-number?))
+            }
             Expr::Binary(operator, left, right) => {
                 let a = self.expr(left, focus, depth + 1)?;
                 if *operator == BinaryOp::Or && a.to_boolean() {
+                    self.give_value(a);
                     return Ok(Value::Boolean(true));
                 }
                 if *operator == BinaryOp::And && !a.to_boolean() {
+                    self.give_value(a);
                     return Ok(Value::Boolean(false));
                 }
                 let b = self.expr(right, focus, depth + 1)?;
@@ -243,10 +281,15 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
             } => {
                 let mut nodes = if let Some(base) = base {
                     self.expr(base, focus, depth + 1)?.into_nodes()?
-                } else if *absolute {
-                    vec![self.root(&focus.node)?]
                 } else {
-                    vec![focus.node.clone()]
+                    let start = if *absolute {
+                        self.root(&focus.node)?
+                    } else {
+                        focus.node.clone()
+                    };
+                    let mut nodes = self.take();
+                    nodes.push(start);
+                    nodes
                 };
                 for step in steps {
                     nodes = self.step(nodes, step, depth + 1)?;
@@ -268,19 +311,18 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
     ) -> Result<Value<N::Node>> {
         use BinaryOp::*;
         let nav = self.ctx.navigator;
-        match op {
-            Or => Ok(Value::Boolean(a.to_boolean() || b.to_boolean())),
-            And => Ok(Value::Boolean(a.to_boolean() && b.to_boolean())),
-            Union => {
-                let left = a.into_nodes()?;
-                let right = b.into_nodes()?;
-                self.spend(left.len() + right.len())?;
-                // Both operands are already canonical. Merge them in linear
-                // time; sorting their concatenation repeats order comparisons
-                // that may be expensive for an application-backed navigator.
-                let mut nodes = Vec::with_capacity(left.len() + right.len());
-                let mut left = left.into_iter().peekable();
-                let mut right = right.into_iter().peekable();
+        if op == Union {
+            let mut left = a.into_nodes()?;
+            let mut right = b.into_nodes()?;
+            self.spend(left.len() + right.len())?;
+            // Both operands are already canonical. Merge them in linear
+            // time; sorting their concatenation repeats order comparisons
+            // that may be expensive for an application-backed navigator.
+            let mut nodes = self.take();
+            nodes.reserve(left.len() + right.len());
+            {
+                let mut left = left.drain(..).peekable();
+                let mut right = right.drain(..).peekable();
                 while let (Some(a), Some(b)) = (left.peek(), right.peek()) {
                     match nav.compare_document_order(a, b) {
                         Ordering::Less => nodes.push(left.next().unwrap()),
@@ -293,10 +335,32 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
                 }
                 nodes.extend(left);
                 nodes.extend(right);
-                Ok(Value::Nodes(nodes))
             }
-            Eq | Ne => Ok(Value::Boolean(self.equality(&a, &b, op == Ne)?)),
-            Lt | Le | Gt | Ge => Ok(Value::Boolean(self.relational(&a, &b, op)?)),
+            self.give(left);
+            self.give(right);
+            return Ok(Value::Nodes(nodes));
+        }
+        let result = self.scalar_binary(op, &a, &b);
+        self.give_value(a);
+        self.give_value(b);
+        result
+    }
+
+    /// A binary operator other than union; the operands stay with the caller.
+    fn scalar_binary(
+        &mut self,
+        op: BinaryOp,
+        a: &Value<N::Node>,
+        b: &Value<N::Node>,
+    ) -> Result<Value<N::Node>> {
+        use BinaryOp::*;
+        let nav = self.ctx.navigator;
+        match op {
+            Or => Ok(Value::Boolean(a.to_boolean() || b.to_boolean())),
+            And => Ok(Value::Boolean(a.to_boolean() && b.to_boolean())),
+            Union => unreachable!("union is evaluated by binary"),
+            Eq | Ne => Ok(Value::Boolean(self.equality(a, b, op == Ne)?)),
+            Lt | Le | Gt | Ge => Ok(Value::Boolean(self.relational(a, b, op)?)),
             Add | Sub | Mul | Div | Mod => {
                 let x = a.to_number(nav)?;
                 let y = b.to_number(nav)?;
@@ -431,16 +495,20 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
                     },
                     depth,
                 )?;
-                Ok(match value {
+                let keep = match value {
                     Value::Number(n) => n == position as f64,
                     _ => value.to_boolean(),
-                })
+                };
+                self.give_value(value);
+                Ok(keep)
             })?;
         }
         Ok(nodes)
     }
 
-    fn step(&mut self, nodes: Vec<N::Node>, step: &Step, depth: usize) -> Result<Vec<N::Node>> {
+    /// Consumes `nodes` (its buffer goes back to the pool) and returns a new
+    /// buffer holding the step's result.
+    fn step(&mut self, mut nodes: Vec<N::Node>, step: &Step, depth: usize) -> Result<Vec<N::Node>> {
         let test = self.resolve_test(&step.test, step.axis)?;
         let principal = match step.axis {
             Axis::Attribute => NodeKind::Attribute,
@@ -448,12 +516,14 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
             _ => NodeKind::Element,
         };
         let keyed = self.key_run(step, &test);
-        let mut result = Vec::new();
-        for node in nodes {
+        let mut result = self.take();
+        for node in nodes.drain(..) {
             self.spend(1)?;
             if let Some((name, keys)) = &keyed {
                 if let Some(found) = self.child_by_key(&node, name, keys, depth)? {
-                    result.extend(self.filter(found, &step.predicates[keys.len()..], depth)?);
+                    let mut found = self.filter(found, &step.predicates[keys.len()..], depth)?;
+                    result.append(&mut found);
+                    self.give(found);
                     continue;
                 }
             }
@@ -471,8 +541,11 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
                     matching
                 }
             };
-            result.extend(self.filter(matching, &step.predicates, depth)?);
+            let mut matching = self.filter(matching, &step.predicates, depth)?;
+            result.append(&mut matching);
+            self.give(matching);
         }
+        self.give(nodes);
         Ok(self.normalize(result))
     }
 
@@ -542,16 +615,22 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
                 }
             }
         }
-        match nav.child_by_key(node, name, &values) {
+        let entry = nav.child_by_key(node, name, &values);
+        for (_, value) in values {
+            self.give_value(value);
+        }
+        match entry {
             None => {
                 self.remaining = budget;
                 Ok(None)
             }
-            Some(None) => Ok(Some(Vec::new())),
+            Some(None) => Ok(Some(self.take())),
             Some(Some(found)) => {
                 self.spend(1)?;
                 nav.validate_node(&found)?;
-                Ok(Some(vec![found]))
+                let mut nodes = self.take();
+                nodes.push(found);
+                Ok(Some(nodes))
             }
         }
     }
@@ -645,36 +724,44 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
     }
 
     fn children(&mut self, node: &N::Node) -> Result<Vec<N::Node>> {
+        let mut nodes = self.take();
+        self.push_children(node, &mut nodes)?;
+        Ok(nodes)
+    }
+
+    /// Append `node`'s children to `out` in document order.
+    fn push_children(&mut self, node: &N::Node, out: &mut Vec<N::Node>) -> Result<()> {
         if !matches!(
             self.ctx.navigator.kind(node),
             NodeKind::Root | NodeKind::Element
         ) {
-            return Ok(Vec::new());
+            return Ok(());
         }
-        let mut nodes = Vec::new();
         for child in self.ctx.navigator.children(node) {
             self.spend(1)?;
             let child = child?;
             self.ctx.navigator.validate_node(&child)?;
-            nodes.push(child);
+            out.push(child);
         }
-        Ok(nodes)
+        Ok(())
     }
 
     fn descendants(&mut self, node: &N::Node, include_self: bool) -> Result<Vec<N::Node>> {
-        let mut result = if include_self {
-            vec![node.clone()]
-        } else {
-            Vec::new()
-        };
+        let mut result = self.take();
+        if include_self {
+            result.push(node.clone());
+        }
+        // A stack of unvisited nodes, each node's children pushed reversed so
+        // they pop in document order.
         let mut pending = self.children(node)?;
         pending.reverse();
         while let Some(child) = pending.pop() {
-            result.push(child.clone());
-            let mut children = self.children(&child)?;
-            children.reverse();
-            pending.extend(children);
+            let start = pending.len();
+            self.push_children(&child, &mut pending)?;
+            pending[start..].reverse();
+            result.push(child);
         }
+        self.give(pending);
         Ok(result)
     }
 
@@ -683,45 +770,47 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
             self.ctx.navigator.kind(node),
             NodeKind::Attribute | NodeKind::Namespace
         ) {
-            return Ok(Vec::new());
+            return Ok(self.take());
         }
         let Some(parent) = self.parent(node)? else {
-            return Ok(Vec::new());
+            return Ok(self.take());
         };
-        let children = self.children(&parent)?;
-        let Some(index) = children.iter().position(|n| n == node) else {
-            return Ok(Vec::new());
-        };
-        Ok(if preceding {
-            children[..index].iter().rev().cloned().collect()
-        } else {
-            children[index + 1..].to_vec()
-        })
+        let mut children = self.children(&parent)?;
+        match children.iter().position(|n| n == node) {
+            None => children.clear(),
+            Some(index) if preceding => {
+                children.truncate(index);
+                children.reverse();
+            }
+            Some(index) => {
+                children.drain(..=index);
+            }
+        }
+        Ok(children)
     }
 
     fn axis(&mut self, node: &N::Node, axis: Axis) -> Result<Vec<N::Node>> {
         use Axis::*;
+        let mut result = self.take();
         match axis {
-            SelfAxis => Ok(vec![node.clone()]),
-            Child => self.children(node),
-            Descendant => self.descendants(node, false),
-            DescendantOrSelf => self.descendants(node, true),
-            Parent => Ok(self.parent(node)?.into_iter().collect()),
+            SelfAxis => result.push(node.clone()),
+            Child => self.push_children(node, &mut result)?,
+            Descendant | DescendantOrSelf => {
+                self.give(result);
+                return self.descendants(node, axis == DescendantOrSelf);
+            }
+            Parent => result.extend(self.parent(node)?),
             Ancestor | AncestorOrSelf => {
-                let mut result = if axis == AncestorOrSelf {
-                    vec![node.clone()]
-                } else {
-                    Vec::new()
-                };
+                if axis == AncestorOrSelf {
+                    result.push(node.clone());
+                }
                 let mut current = node.clone();
                 while let Some(parent) = self.parent(&current)? {
                     result.push(parent.clone());
                     current = parent;
                 }
-                Ok(result)
             }
             Attribute => {
-                let mut result = Vec::new();
                 if self.ctx.navigator.kind(node) == NodeKind::Element {
                     for n in self.ctx.navigator.attributes(node) {
                         self.spend(1)?;
@@ -730,10 +819,8 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
                         result.push(n);
                     }
                 }
-                Ok(result)
             }
             Namespace => {
-                let mut result = Vec::new();
                 if self.ctx.navigator.kind(node) == NodeKind::Element {
                     for n in self.ctx.navigator.namespaces(node) {
                         self.spend(1)?;
@@ -742,13 +829,13 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
                         result.push(n);
                     }
                 }
-                Ok(result)
             }
-            FollowingSibling => self.siblings(node, false),
-            PrecedingSibling => self.siblings(node, true),
+            FollowingSibling | PrecedingSibling => {
+                self.give(result);
+                return self.siblings(node, axis == PrecedingSibling);
+            }
             Following | Preceding => {
                 let preceding = axis == Preceding;
-                let mut result = Vec::new();
                 let mut current = node.clone();
                 if matches!(
                     self.ctx.navigator.kind(node),
@@ -758,26 +845,31 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
                         return Ok(result);
                     };
                     if !preceding {
-                        result.extend(self.descendants(&owner, false)?);
+                        let mut subtree = self.descendants(&owner, false)?;
+                        result.append(&mut subtree);
+                        self.give(subtree);
                     }
                     current = owner;
                 }
                 loop {
-                    for sibling in self.siblings(&current, preceding)? {
-                        let mut subtree = self.descendants(&sibling, true)?;
+                    let siblings = self.siblings(&current, preceding)?;
+                    for sibling in &siblings {
+                        let mut subtree = self.descendants(sibling, true)?;
                         if preceding {
                             subtree.reverse();
                         }
-                        result.extend(subtree);
+                        result.append(&mut subtree);
+                        self.give(subtree);
                     }
+                    self.give(siblings);
                     match self.parent(&current)? {
                         Some(parent) => current = parent,
                         None => break,
                     }
                 }
-                Ok(result)
             }
         }
+        Ok(result)
     }
 }
 

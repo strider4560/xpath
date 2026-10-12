@@ -483,6 +483,9 @@ impl Navigator for Document {
     fn name(&self, node: &NodeId) -> Result<Option<ExpandedName>> {
         Ok(self.get(node)?.name.clone())
     }
+    fn name_matches(&self, node: &NodeId, name: &ExpandedName) -> bool {
+        matches!(self.get(node), Ok(Node { name: Some(actual), .. }) if actual == name)
+    }
     fn qualified_name(&self, node: &NodeId) -> Result<String> {
         Ok(self.get(node)?.qualified_name.clone())
     }

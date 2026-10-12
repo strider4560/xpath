@@ -1,4 +1,4 @@
-use crate::{Error, ErrorKind, ExpandedName, Namespaces, Navigator, Result, Value};
+use crate::{Error, ErrorKind, ExpandedName, Namespaces, Navigator, NodeSetPool, Result, Value};
 use std::{
     collections::{BTreeMap, HashMap},
     rc::Rc,
@@ -88,6 +88,7 @@ pub struct Context<'a, N: Navigator> {
     pub(crate) functions: BTreeMap<ExpandedName, Function<'a, N>>,
     pub(crate) shared_functions: Option<&'a FunctionTable<N>>,
     pub(crate) limits: Limits,
+    pub(crate) pool: Option<&'a NodeSetPool<N::Node>>,
 }
 impl<'a, N: Navigator> Context<'a, N> {
     pub fn new(navigator: &'a N, node: N::Node) -> Self {
@@ -103,6 +104,7 @@ impl<'a, N: Navigator> Context<'a, N> {
             functions: BTreeMap::new(),
             shared_functions: None,
             limits: Limits::default(),
+            pool: None,
         }
     }
     pub fn with_namespace(mut self, prefix: impl Into<String>, uri: impl Into<String>) -> Self {
@@ -128,6 +130,16 @@ impl<'a, N: Navigator> Context<'a, N> {
     /// set's cache, so warm evaluations resolve names without allocating.
     pub fn with_namespaces(mut self, namespaces: &'a Namespaces) -> Self {
         self.shared_namespaces = Some(namespaces);
+        self
+    }
+    /// Take intermediate node-set buffers from `pool` and give them back
+    /// after use, so warm evaluations reuse them instead of allocating.
+    ///
+    /// Results are unchanged. The node-set an evaluation returns is owned by
+    /// the caller and never given back by the evaluator; vectors returned by
+    /// [`Navigator::children_named`] are given to the pool after use.
+    pub fn with_pool(mut self, pool: &'a NodeSetPool<N::Node>) -> Self {
+        self.pool = Some(pool);
         self
     }
     pub fn with_variable(self, name: impl Into<String>, value: Value<N::Node>) -> Self {
