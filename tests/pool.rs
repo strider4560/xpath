@@ -113,12 +113,13 @@ fn warm_path_expression_allocates_nothing() {
     warm();
     // Node-set buffers allocate nothing when warm. The exact residual is the
     // R2 keyed-lookup attempt for `p:c[p:d = ...]` (the XML adapter declines
-    // `child_by_key`, so the step then scans), once per evaluation:
-    //   1  the evaluator's key-run vector (key name, right-hand side) pairs;
-    //   1  the `(ExpandedName, Value)` slice passed to `child_by_key`;
-    //   2  `ExpandedName::clone(key)` for `p:d` (namespace URI + local name),
-    //      owned by that slice (`child_by_key` API; deferred).
-    const KEYED_LOOKUP: usize = 4;
+    // `child_by_key`, so the step then scans), once per evaluation, all from
+    // the R2 owned-key API:
+    //   1  the values vector, the `(ExpandedName, Value)` slice passed to
+    //      `child_by_key`;
+    //   2  `ExpandedName::clone(key)` for `p:d` (namespace URI + local name)
+    //      owned by that slice.
+    const KEYED_LOOKUP: usize = 3;
     for _ in 0..3 {
         assert_eq!(allocations_during(warm), KEYED_LOOKUP);
     }

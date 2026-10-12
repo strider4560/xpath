@@ -519,9 +519,10 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
         let mut result = self.take();
         for node in nodes.drain(..) {
             self.spend(1)?;
-            if let Some((name, keys)) = &keyed {
+            if let Some((name, run)) = &keyed {
+                let (keys, rest) = step.predicates.split_at(*run);
                 if let Some(found) = self.child_by_key(&node, name, keys, depth)? {
-                    let mut found = self.filter(found, &step.predicates[keys.len()..], depth)?;
+                    let mut found = self.filter(found, rest, depth)?;
                     result.append(&mut found);
                     self.give(found);
                     continue;
@@ -549,50 +550,48 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
         Ok(self.normalize(result))
     }
 
-    /// R2: the leading run of `[k = e]` predicates of a `child::name` step
-    /// that a keyed lookup can answer, as (key name, right-hand side) pairs.
+    /// R2: the step's name and the length of the leading run of `[k = e]`
+    /// predicates of a `child::name` step that a keyed lookup can answer.
     ///
     /// Each predicate must be `=` between a one-step relative `child::k` name
     /// test without predicates and a context-independent expression (either
-    /// operand order). The first predicate of any other shape, including every
-    /// position-dependent one, ends the run. `None` if the run is empty.
-    fn key_run<'e>(&self, step: &'e Step, test: &ResolvedTest) -> Option<KeyRun<'e>> {
+    /// operand order), see [`key_pair`]. The first predicate of any other
+    /// shape, including every position-dependent one, ends the run, as does a
+    /// key with an unbound prefix (ordinary evaluation then reports it exactly
+    /// when it would have before). `None` if the run is empty. Allocates
+    /// nothing: the run is re-read from the predicates by `child_by_key`.
+    fn key_run(&self, step: &Step, test: &ResolvedTest) -> Option<(Rc<ExpandedName>, usize)> {
         let ResolvedTest::Name(name) = test else {
             return None;
         };
         if step.axis != Axis::Child {
             return None;
         }
-        let mut keys = Vec::new();
-        for predicate in &step.predicates {
-            let Expr::Binary(BinaryOp::Eq, left, right) = predicate else {
-                break;
-            };
-            let pair = match (key_child(left), key_child(right)) {
-                (Some(key), _) if context_independent(right) => (key, &**right),
-                (_, Some(key)) if context_independent(left) => (key, &**left),
-                _ => break,
-            };
-            // An unresolvable key prefix ends the run; ordinary evaluation
-            // then reports it exactly when it would have before.
-            match self.test_name(pair.0, Axis::Child) {
-                Ok(key) => keys.push((key, pair.1)),
-                Err(_) => break,
-            }
-        }
-        (!keys.is_empty()).then(|| (name.clone(), keys))
+        let run = step
+            .predicates
+            .iter()
+            .take_while(|predicate| {
+                key_pair(predicate).is_some_and(|(key, _)| {
+                    key.prefix
+                        .as_deref()
+                        .is_none_or(|prefix| self.namespace(prefix).is_ok())
+                })
+            })
+            .count();
+        (run > 0).then(|| (name.clone(), run))
     }
 
     /// R2: evaluate each key's right-hand side once against `node` and ask the
-    /// navigator for the entry. `None` means "scan normally": the hook is not
-    /// supported here, or a right-hand side failed (ordinary evaluation then
-    /// reports that failure only if it reaches it). The work budget spent on a
-    /// declined attempt is refunded so the fallback is indistinguishable.
+    /// navigator for the entry. `keys` is a run accepted by `key_run`. `None`
+    /// means "scan normally": the hook is not supported here, or a right-hand
+    /// side failed (ordinary evaluation then reports that failure only if it
+    /// reaches it). The work budget spent on a declined attempt is refunded so
+    /// the fallback is indistinguishable.
     fn child_by_key(
         &mut self,
         node: &N::Node,
         name: &ExpandedName,
-        keys: &[(Rc<ExpandedName>, &Expr)],
+        keys: &[Expr],
         depth: usize,
     ) -> Result<Option<Vec<N::Node>>> {
         let nav = self.ctx.navigator;
@@ -606,9 +605,19 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
             size: 1,
         };
         let mut values = Vec::with_capacity(keys.len());
-        for (key, rhs) in keys {
+        for predicate in keys {
+            // Both always succeed for a run accepted by `key_run`; a failure
+            // would just decline the lookup.
+            let Some((key, rhs)) = key_pair(predicate) else {
+                self.remaining = budget;
+                return Ok(None);
+            };
+            let Ok(key) = self.test_name(key, Axis::Child) else {
+                self.remaining = budget;
+                return Ok(None);
+            };
             match self.expr(rhs, &focus, depth + 1) {
-                Ok(value) => values.push((ExpandedName::clone(key), value)),
+                Ok(value) => values.push((ExpandedName::clone(&key), value)),
                 Err(_) => {
                     self.remaining = budget;
                     return Ok(None);
@@ -909,9 +918,19 @@ fn context_independent(expr: &Expr) -> bool {
     }
 }
 
-/// A keyed `child::name` step: the step's name and its (key name, right-hand
-/// side) pairs.
-type KeyRun<'e> = (Rc<ExpandedName>, Vec<(Rc<ExpandedName>, &'e Expr)>);
+/// A predicate a keyed lookup can answer: `k = e` or `e = k`, with `k` a
+/// one-step relative child name test and `e` context-independent, as
+/// (key name, right-hand side).
+fn key_pair(predicate: &Expr) -> Option<(&QName, &Expr)> {
+    let Expr::Binary(BinaryOp::Eq, left, right) = predicate else {
+        return None;
+    };
+    match (key_child(left), key_child(right)) {
+        (Some(key), _) if context_independent(right) => Some((key, right)),
+        (_, Some(key)) if context_independent(left) => Some((key, left)),
+        _ => None,
+    }
+}
 
 const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
 
