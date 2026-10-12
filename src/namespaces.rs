@@ -11,8 +11,9 @@ use std::{
 /// typically one set per read.
 ///
 /// The set remembers every name it has resolved, so a warm evaluation of the
-/// same expression resolves its names without allocating. Because the bindings
-/// cannot change after construction, the cache never goes stale. A context
+/// same expression resolves its names without allocating. The cache is cleared
+/// whenever the set is rebound (`with_namespace`, `with_default_element_namespace`),
+/// so it never serves a name resolved under an earlier binding. A context
 /// that adds bindings of its own (`Context::with_namespace` or
 /// `Context::with_default_element_namespace`) still resolves through this set
 /// where its own bindings are silent, but never writes to the cache.
@@ -35,12 +36,14 @@ impl Namespaces {
     /// Bind `prefix` to `uri`, replacing any earlier binding of `prefix`.
     pub fn with_namespace(mut self, prefix: impl Into<String>, uri: impl Into<String>) -> Self {
         self.map.insert(prefix.into(), uri.into());
+        self.clear_cache();
         self
     }
     /// The namespace of unprefixed element tests; see
     /// [`Context::with_default_element_namespace`](crate::Context::with_default_element_namespace).
     pub fn with_default_element_namespace(mut self, uri: impl Into<String>) -> Self {
         self.default_element_namespace = uri.into();
+        self.clear_cache();
         self
     }
     /// The URI bound to `prefix` in this set (the implicit `xml` binding excluded).
@@ -49,6 +52,11 @@ impl Namespaces {
     }
     pub fn default_element_namespace(&self) -> &str {
         &self.default_element_namespace
+    }
+
+    fn clear_cache(&mut self) {
+        self.resolved.get_mut().clear();
+        self.resolved_elements.get_mut().clear();
     }
 
     pub(crate) fn cached(&self, name: &QName) -> Option<Rc<ExpandedName>> {

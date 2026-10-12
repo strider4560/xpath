@@ -158,3 +158,32 @@ fn warm_evaluation_allocates_nothing_for_names() {
     });
     assert_eq!(warm_wildcard, warm_any, "p:* vs * on a warm shared set");
 }
+
+#[test]
+fn rebinding_after_use_invalidates_cache() {
+    let doc = Document::parse(DOC).unwrap();
+    let xpath = XPath::compile("/a/z:b").unwrap();
+    let ns = Namespaces::new()
+        .with_default_element_namespace("urn:d")
+        .with_namespace("z", "urn:p");
+    {
+        let ctx = Context::new(&doc, doc.root()).with_namespaces(&ns);
+        assert_eq!(selected_strings(&doc, &xpath, &ctx), ["x"]);
+    }
+    // Rebinding a used set must not serve the name resolved under `urn:p`.
+    let ns = ns.with_namespace("z", "urn:q");
+    assert_eq!(ns.namespace("z"), Some("urn:q"));
+    {
+        let ctx = Context::new(&doc, doc.root()).with_namespaces(&ns);
+        assert!(selected_strings(&doc, &xpath, &ctx).is_empty());
+    }
+    // Same for the default element namespace.
+    let unprefixed = XPath::compile("/a/b").unwrap();
+    {
+        let ctx = Context::new(&doc, doc.root()).with_namespaces(&ns);
+        assert_eq!(selected_strings(&doc, &unprefixed, &ctx), ["y"]);
+    }
+    let ns = ns.with_default_element_namespace("urn:q");
+    let ctx = Context::new(&doc, doc.root()).with_namespaces(&ns);
+    assert!(selected_strings(&doc, &unprefixed, &ctx).is_empty());
+}

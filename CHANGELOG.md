@@ -22,7 +22,10 @@ definitions) and the libxml2 differential pass unchanged.
   bindings never poisons it. `Namespaces` is not `Send`/`Sync`; use one per
   thread (typically one per read). Contexts that do not use `with_namespaces`
   resolve names as before but now pay one extra `Rc` allocation per resolved
-  name per evaluation. Namespace-wildcard (`p:*`) and processing-instruction
+  name per evaluation. Such contexts also resolve R2 key names once per input
+  node instead of once per step (an `Rc` plus an `ExpandedName` per key per
+  node). Rebinding a `Namespaces` (`with_namespace`,
+  `with_default_element_namespace`) clears its cache. Namespace-wildcard (`p:*`) and processing-instruction
   target tests borrow their URI and target instead of allocating.
 - `ast::QName` derives `Hash`.
 - **`NodeSetPool<T>`** (`new`, `take`, `give`, `len`, `is_empty`, `Default`,
