@@ -56,7 +56,7 @@ struct Evaluator<'a, 'b, N: Navigator> {
     remaining: usize,
 }
 
-impl<N: Navigator> Evaluator<'_, '_, N> {
+impl<'a, N: Navigator> Evaluator<'a, '_, N> {
     fn spend(&mut self, amount: usize) -> Result<()> {
         self.remaining = self
             .remaining
@@ -89,7 +89,8 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
         }
     }
 
-    fn namespace(&self, prefix: &str) -> Result<&str> {
+    /// The URI bound to `prefix`, borrowed from the context or its shared set.
+    fn namespace(&self, prefix: &str) -> Result<&'a str> {
         if prefix == "xml" {
             return Ok(XML_NAMESPACE);
         }
@@ -588,15 +589,20 @@ impl<N: Navigator> Evaluator<'_, '_, N> {
         }
     }
 
-    fn resolve_test(&self, test: &NodeTest, axis: Axis) -> Result<ResolvedTest> {
+    /// Borrows wildcard URIs and PI targets, so resolving a test never
+    /// allocates beyond a cold name resolution.
+    fn resolve_test<'t>(&self, test: &'t NodeTest, axis: Axis) -> Result<ResolvedTest<'t>>
+    where
+        'a: 't,
+    {
         Ok(match test {
             NodeTest::Any => ResolvedTest::Any,
             NodeTest::Name(n) => ResolvedTest::Name(self.test_name(n, axis)?),
-            NodeTest::NamespaceWildcard(p) => ResolvedTest::Namespace(self.namespace(p)?.into()),
+            NodeTest::NamespaceWildcard(p) => ResolvedTest::Namespace(self.namespace(p)?),
             NodeTest::Node => ResolvedTest::Node,
             NodeTest::Text => ResolvedTest::Kind(NodeKind::Text),
             NodeTest::Comment => ResolvedTest::Kind(NodeKind::Comment),
-            NodeTest::ProcessingInstruction(target) => ResolvedTest::Pi(target.clone()),
+            NodeTest::ProcessingInstruction(target) => ResolvedTest::Pi(target.as_deref()),
         })
     }
 
@@ -817,11 +823,11 @@ type KeyRun<'e> = (Rc<ExpandedName>, Vec<(Rc<ExpandedName>, &'e Expr)>);
 
 const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
 
-enum ResolvedTest {
+enum ResolvedTest<'t> {
     Any,
     Name(Rc<ExpandedName>),
-    Namespace(String),
+    Namespace(&'t str),
     Node,
     Kind(NodeKind),
-    Pi(Option<String>),
+    Pi(Option<&'t str>),
 }

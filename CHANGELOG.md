@@ -20,7 +20,10 @@ definitions) and the libxml2 differential pass unchanged.
   context's own namespace map and own default element namespace are both empty
   (every lookup went through the shared set), so a context layering its own
   bindings never poisons it. `Namespaces` is not `Send`/`Sync`; use one per
-  thread (typically one per read).
+  thread (typically one per read). Contexts that do not use `with_namespaces`
+  resolve names as before but now pay one extra `Rc` allocation per resolved
+  name per evaluation. Namespace-wildcard (`p:*`) and processing-instruction
+  target tests borrow their URI and target instead of allocating.
 - `ast::QName` derives `Hash`.
 
 ## 0.2.0 — 2026-10-11

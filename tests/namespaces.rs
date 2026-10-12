@@ -142,4 +142,19 @@ fn warm_evaluation_allocates_nothing_for_names() {
         warm_own >= warm_shared + 8,
         "shared {warm_shared} vs own {warm_own}"
     );
+
+    // `p:d` has no children, so a final `p:*` or `*` step visits no candidate
+    // and the two paths differ only in resolving `p:*`'s namespace, which
+    // must not allocate either.
+    let wildcard = XPath::compile("/a/p:b/p:c/p:d/p:*").unwrap();
+    let any = XPath::compile("/a/p:b/p:c/p:d/*").unwrap();
+    assert!(wildcard.select(&shared).unwrap().is_empty());
+    assert!(any.select(&shared).unwrap().is_empty());
+    let warm_wildcard = allocations_during(|| {
+        wildcard.select(&shared).unwrap();
+    });
+    let warm_any = allocations_during(|| {
+        any.select(&shared).unwrap();
+    });
+    assert_eq!(warm_wildcard, warm_any, "p:* vs * on a warm shared set");
 }
