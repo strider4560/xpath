@@ -169,3 +169,93 @@ impl Navigator for Counted<'_> {
         self.tree.compare_document_order(a, b)
     }
 }
+
+/// A store-shaped adapter over [`Tree`] with key-only indexes: per-parent
+/// child counts by name (R9) and, per name, the preorder handles of every
+/// node with that name (R8; a subtree is a contiguous handle range, so the
+/// descendants named `x` are one range scan). Without `hooks` it declines,
+/// and the evaluator scans `Tree`.
+pub struct Indexed<'a> {
+    pub tree: &'a Tree,
+    pub hooks: bool,
+    by_name: std::collections::HashMap<&'static str, Vec<usize>>,
+    subtree_end: Vec<usize>,
+}
+
+impl<'a> Indexed<'a> {
+    pub fn new(tree: &'a Tree, hooks: bool) -> Self {
+        let mut by_name: std::collections::HashMap<&'static str, Vec<usize>> = Default::default();
+        let mut subtree_end = vec![0; tree.nodes.len()];
+        for id in (0..tree.nodes.len()).rev() {
+            if id != 0 {
+                by_name.entry(tree.nodes[id].name).or_default().push(id);
+            }
+            subtree_end[id] = tree.nodes[id]
+                .children
+                .last()
+                .map_or(id + 1, |&last| subtree_end[last]);
+        }
+        for ids in by_name.values_mut() {
+            ids.reverse();
+        }
+        Self {
+            tree,
+            hooks,
+            by_name,
+            subtree_end,
+        }
+    }
+    fn local<'n>(&self, name: &'n ExpandedName) -> Option<&'n str> {
+        (name.namespace_uri == NS).then_some(name.local_name.as_str())
+    }
+}
+
+impl Navigator for Indexed<'_> {
+    type Node = usize;
+    fn kind(&self, node: &usize) -> NodeKind {
+        self.tree.kind(node)
+    }
+    fn parent(&self, node: &usize) -> Result<Option<usize>> {
+        self.tree.parent(node)
+    }
+    fn children<'a>(&'a self, node: &'a usize) -> impl Iterator<Item = Result<usize>> + 'a {
+        self.tree.children(node)
+    }
+    fn name(&self, node: &usize) -> Result<Option<ExpandedName>> {
+        self.tree.name(node)
+    }
+    fn name_matches(&self, node: &usize, name: &ExpandedName) -> bool {
+        *node != 0 && self.local(name) == Some(self.tree.nodes[*node].name)
+    }
+    fn string_value(&self, node: &usize) -> Result<String> {
+        self.tree.string_value(node)
+    }
+    fn compare_document_order(&self, a: &usize, b: &usize) -> Ordering {
+        a.cmp(b)
+    }
+    fn descendants_named(&self, node: &usize, name: &ExpandedName) -> Option<Vec<usize>> {
+        if !self.hooks {
+            return None;
+        }
+        let Some(ids) = self.local(name).and_then(|local| self.by_name.get(local)) else {
+            return Some(Vec::new());
+        };
+        let start = ids.partition_point(|&id| id <= *node);
+        let end = ids.partition_point(|&id| id < self.subtree_end[*node]);
+        Some(ids[start..end].to_vec())
+    }
+    fn count_children_named(&self, parent: &usize, name: &ExpandedName) -> Option<usize> {
+        if !self.hooks {
+            return None;
+        }
+        let local = self.local(name)?;
+        // A key-only count: compare names, never materialize handles.
+        Some(
+            self.tree.nodes[*parent]
+                .children
+                .iter()
+                .filter(|&&child| self.tree.nodes[child].name == local)
+                .count(),
+        )
+    }
+}

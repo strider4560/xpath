@@ -102,3 +102,13 @@ The YANG integration points are fallible storage iterators, stable node handles,
 expanded names, an explicit module-default element namespace, variable bindings,
 and extension functions with initial/current context. Accessible-tree rules and
 YANG-specific semantics belong to the caller.
+
+## Navigator conformance kit (0.4.0)
+
+The `conformance` feature exposes the same Jaxen corpus, parameterized over
+any `Navigator`, plus a hook-consistency matrix (`xpath1::conformance::run`
+and `check_hooks`). `tests/conformance.rs` runs it against the XML adapter
+(no hooks) and `conformance::ScanHooks` (every hook answers): both pass with
+the accounting above, and ten deliberately lying hook implementations are
+each reported. `tests/jaxen.rs` remains the unchanged reference harness. See
+`docs/pushdown-report.md` for the 0.4.0 evidence and test accounting.

@@ -1,5 +1,96 @@
 # Changelog
 
+## 0.4.0 — 2026-10-26 — WP10
+
+Completes the storage-hook family begun in 0.2.0 (D21): every step shape with
+a prefix-scan or point-get form now has a hook, plus cooperative cancellation
+and a Navigator conformance kit. Every new `Navigator` method has a default
+that declines, so navigator implementations compile unchanged. Evaluation
+results are unchanged: the Jaxen corpus (296 assertion definitions) and the
+10,000-case libxml2 differential pass unchanged with the XML adapter (which
+implements none of the new hooks), and a navigator answering every hook gives
+byte-identical output. Node sets are still materialized; there is no streaming
+evaluation or optimizer.
+
+### Added
+
+- **R7, public key-run analysis** (`ast`). `Step::key_run(&self) -> usize`,
+  `ast::key_pair(&Expr) -> Option<(&QName, &Expr)>` and
+  `ast::context_independent(&Expr) -> bool` expose the evaluator's R2
+  recognizer, so planners and access-control matchers reuse its exact
+  grammar. The evaluator now calls them; its own `key_run` only adds the
+  unbound-prefix check on top.
+- **R8, `Navigator::descendants_named(&self, node, name) -> Option<Vec<Node>>`.**
+  Asked for `descendant::name` and `descendant-or-self::name` steps, and for
+  `//name` (the parser's `descendant-or-self::node()/child::name` when neither
+  step has predicates). Element descendants only, in document order, without
+  duplicates, not including `node`; for `descendant-or-self` the evaluator
+  adds the context node itself when it matches. Non-element results are
+  dropped, each returned handle is validated and charged one work unit, and
+  the vectors are given to the pool after use. For `//name` over several
+  input nodes, one declined input makes the evaluator refund the attempt and
+  evaluate both steps normally.
+- **R9, `Navigator::count_children_named(&self, parent, name) -> Option<usize>`
+  and `Navigator::exists_child_named(&self, parent, name) -> Option<bool>`.**
+  Only for a relative, single `child::name` step without predicates at a root
+  or element focus: `count(name)` asks `count_children_named` (one work unit
+  when answered); the same path in boolean position (an operand of `and` /
+  `or`, the argument of `boolean()` or `not()`, or a predicate `[name]`) asks
+  `exists_child_named`. Every other shape (predicates, several steps, absolute,
+  descendant, a filter base) evaluates as before.
+- **R10, cooperative cancellation.** `Limits::deadline: Option<Instant>` and
+  `Context::with_cancel(&'a AtomicBool)`. Both are read when an evaluation
+  starts (so a passed deadline or a set flag ends it before any navigation)
+  and then once per `max_operations / 256` work units, clamped to 1..=4096;
+  either ends evaluation with `ErrorKind::Limit` ("XPath evaluation
+  cancelled" / "XPath evaluation deadline exceeded"). The check is a
+  decrement and a compare per charge; without either, behavior is unchanged.
+  Work charged inside core functions (`lang`, `id`, `sum`) counts toward the
+  budget but not toward the check cadence.
+- **R11, Navigator conformance kit** (`conformance` feature, implies `xml`;
+  module `xpath1::conformance`). `conformance::run(build)` builds the host's
+  navigator from each of the 22 pinned Jaxen fixture documents
+  (`conformance::DOCUMENTS`), runs the full corpus against it (through a
+  forwarding multi-document navigator, so the host's hooks are exercised),
+  and runs `conformance::check_hooks(&nav, &root)` on each fixture: for every
+  root or element node and every element name present (plus an absent one),
+  `children_named`, `descendants_named`, `count_children_named`,
+  `exists_child_named` and `child_by_key` (probed with single-occurrence
+  child elements as string keys) must agree with a scan of `children` and
+  `name`; `name_matches` with `name`; `parent` with the axes; and
+  `compare_document_order` must be a total order consistent with the tree
+  (checked on consecutive nodes, within namespace and attribute groups, and
+  on a deterministic sample of pairs). `conformance::Report` carries the
+  corpus accounting, failures and hook violations. `conformance::ScanHooks<N>`
+  wraps any navigator and answers every hook from scans: a reference
+  "all hooks" adapter. The XML adapter passes the kit.
+- **R12, thread-safety bounds.** `FunctionTable<N, F = LocalFunction<N>>` is
+  `Send + Sync` exactly when its closures are: `FunctionTable::new()` builds a
+  per-thread table (any `'static` closure, as before);
+  `FunctionTable::new_sync()` builds a `SyncFunctionTable<N>` that accepts
+  only `Send + Sync` closures and is itself `Send + Sync` for every navigator
+  type. `Context::with_functions` accepts either. New exports:
+  `LocalFunction`, `SyncFunction`, `SyncFunctionTable`, and the sealed
+  `TableFunction`. Compile tests (doctests, including a `compile_fail` one)
+  pin both bounds. `Namespaces`, `NodeSetPool` and `Context` are documented
+  as per-thread objects for one set of evaluations.
+- Documentation of the hook family as closed: the shape-to-hook table is in
+  the `Navigator` docs and the README; every other shape materializes.
+- Benchmarks: `pushdown/count` (`count(child::x)` over 1,000 entries) and
+  `pushdown/descendants`, `pushdown/select_descendants` (`//x` over the
+  schema-shaped fixture), each with and without the hooks, over a store-shaped
+  indexed adapter.
+- `tools/differential` client: `XPATH1_HOOKS=1` wraps the fixture in
+  `ScanHooks`, so the libxml2 comparison also covers every hook path.
+
+### Changed
+
+- `Limits` has a third public field, `deadline`. Code that builds `Limits`
+  with a struct literal must add `..Limits::default()` (or `deadline: None`);
+  code using `Limits::default()` and field assignment is unaffected.
+- `FunctionTable` has a second, defaulted type parameter. `FunctionTable<N>`
+  and `FunctionTable::new()` mean what they meant before.
+
 ## 0.3.0 — 2026-10-12
 
 Shared per-read namespace bindings and an opt-in node-set buffer pool (WP9).

@@ -151,6 +151,7 @@ fn comparison_string_reads_share_the_evaluation_budget() {
         .with_limits(Limits {
             max_operations: 20,
             max_depth: 16,
+            ..Limits::default()
         });
     let error = XPath::compile("$a != $b")
         .unwrap()

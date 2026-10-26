@@ -72,8 +72,43 @@ The tree must provide these XPath invariants:
   when the embedding needs `name()` to retain prefixes.
 
 See `examples/custom_tree.rs` for a complete dependency-free adapter. See
-`src/model.rs` for the exact contract. Compiled `XPath` values can be shared across
-threads; build an evaluation context for each caller.
+`src/model.rs` for the exact contract.
+
+Compiled `XPath` values can be shared across threads. A `FunctionTable` built
+with `FunctionTable::new_sync()` (a `SyncFunctionTable`, holding only
+`Send + Sync` closures) is itself `Send + Sync` and can be shared too; one
+built with `FunctionTable::new()` may hold any closure and stays on its thread.
+`Namespaces`, `NodeSetPool` and `Context` are per-thread objects for one set of
+evaluations: build them for each caller (or each read).
+
+### Storage hooks
+
+A storage-backed navigator can answer the step shapes that have a prefix-scan
+or point-get form, instead of letting the evaluator enumerate nodes. The
+family is closed:
+
+| Shape (name test resolved; context node a root or element) | Hook |
+|---|---|
+| any name test | `name_matches` |
+| `child::name` | `children_named` |
+| `child::name[k = e]...` (leading key run, `ast::Step::key_run`) | `child_by_key` |
+| `descendant::name`, `descendant-or-self::name`, `//name` | `descendants_named` |
+| `count(name)` | `count_children_named` |
+| `name` as an `and`/`or` operand, in `boolean()`/`not()`, or as `[name]` | `exists_child_named` |
+
+Every hook has a default that declines (`None`); the evaluator then scans
+exactly as before, with the work budget spent on the attempt refunded, and an
+answer must agree exactly with that scan. Every other shape (predicates on the
+counted or tested path, several steps, wildcards, other axes) materializes
+under `Limits`. Navigators receive expanded names, never prefixes.
+
+The `conformance` feature (`xpath1::conformance`) makes "agree with the scan"
+executable: `conformance::run(|xml| ...)` builds your navigator from each
+pinned Jaxen fixture, runs the full corpus against it, and checks every hook
+and `compare_document_order` against scans of the same tree.
+`conformance::check_hooks(&navigator, &root)` runs the hook matrix on any
+tree, for example a store's own data, and `conformance::ScanHooks` is a
+reference adapter that answers every hook.
 
 ## Integration with YANG
 
@@ -94,10 +129,12 @@ namespaces and `current()` in a predicate.
 To reuse registrations, build a `FunctionTable` once and attach it with
 `with_functions(&table)` (per-context `with_function` entries shadow it), and
 re-focus one context across many evaluations with `set_node`. Storage-backed
-navigators can override `name_matches`, `children_named` and `child_by_key` to
-answer name tests, `parent/leaf` and `list[key = value]` steps without scanning;
-`XPath::ast()` exposes the compiled `ast::Expr` for static analysis. See
-`CHANGELOG.md` for the exact contracts.
+navigators can override the storage hooks above to answer name tests,
+`parent/leaf`, `list[key = value]`, `//node`, `count(list)` and existence
+tests without scanning; `XPath::ast()` exposes the compiled `ast::Expr` for
+static analysis, and `ast::Step::key_run`, `ast::key_pair` and
+`ast::context_independent` are the evaluator's own key-predicate recognizer.
+See `CHANGELOG.md` for the exact contracts.
 
 The YANG library remains responsible for the accessible tree, `when` dummy-node
 rules, schema/default handling, identity and leafref resolution, and the YANG
@@ -134,8 +171,15 @@ AST height 128. Exceeding a limit returns `ErrorKind::Limit`. Syntax errors incl
 byte ranges into the original expression. Evaluation defaults to 1,000,000 work
 units and depth 128; configure `Limits` per context. Work includes AST evaluation,
 node processing, axis traversal and core-function navigation. These are work
-bounds, not memory quotas or timeouts: host callbacks and individual bytes in
-strings are not metered. Extension functions must enforce their own budgets.
+bounds, not memory quotas: host callbacks and individual bytes in strings are not
+metered. Extension functions must enforce their own budgets.
+
+For an RPC-level budget across many evaluations, set `Limits::deadline` (a
+`std::time::Instant`) and/or `Context::with_cancel(&AtomicBool)`. Both are
+checked when an evaluation starts and then every `max_operations / 256` work
+units (at most 4096 apart); either ends the evaluation with `ErrorKind::Limit`.
+Cancellation is cooperative: a long-running navigator or extension call is not
+interrupted.
 
 The XML adapter has an expanded element depth limit of 256 to protect its parser
 stack, including internal entity markup. It does not fetch external DTDs/entities,
@@ -144,9 +188,12 @@ with `Document::register_id`; an attribute spelled `id` is not automatically typ
 as an XML ID. A custom navigator can implement the full host ID policy.
 
 Node sets and intermediate results are materialized. Cursor input does not imply
-constant-memory evaluation or index pushdown. The evaluator reuses node buffers,
-merges sorted unions, and indexes string values for large node-set equality
-comparisons. It does not include a general query optimizer or storage indexes.
+constant-memory evaluation; this version does not promise bounded-memory
+streaming. The storage hooks push the shapes listed above to the navigator;
+everything else is evaluated over materialized node sets. The evaluator reuses
+node buffers, merges sorted unions, and indexes string values for large node-set
+equality comparisons. It does not include a general query optimizer or storage
+indexes of its own.
 
 ## Performance
 
@@ -169,7 +216,7 @@ results, raw samples, reproduction commands, and remaining bottlenecks.
 ## Build and verify
 
 ```sh
-cargo test --locked --all-features
+cargo test --locked --all-features      # includes the conformance kit tests
 cargo test --locked --no-default-features
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
