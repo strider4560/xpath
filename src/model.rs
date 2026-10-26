@@ -58,6 +58,33 @@ impl ExpandedName {
 /// element, its namespaces, its attributes, then descendants. The relative order
 /// within namespace/attribute groups may be implementation-defined but stable.
 /// Iterators permit storage cursors and propagate I/O errors without an XML DOM.
+///
+/// # Storage hooks
+///
+/// A storage-backed navigator can answer some step shapes with a prefix scan
+/// or point get instead of letting the evaluator enumerate nodes. The family
+/// is closed; every other shape materializes under [`Limits`](crate::Limits):
+///
+/// | Shape (name test resolved, context node a root or element) | Hook |
+/// |---|---|
+/// | any name test | [`name_matches`](Self::name_matches) |
+/// | `child::name` | [`children_named`](Self::children_named) |
+/// | `child::name[k = e]...` (leading key run, see [`ast::Step::key_run`](crate::ast::Step::key_run)) | [`child_by_key`](Self::child_by_key) |
+/// | `descendant::name`, `descendant-or-self::name`, `//name` | [`descendants_named`](Self::descendants_named) |
+/// | `count(name)` | [`count_children_named`](Self::count_children_named) |
+/// | `name` in boolean position (`and`/`or` operand, `boolean()`, `not()`, `[name]`) | [`exists_child_named`](Self::exists_child_named) |
+///
+/// Each hook defaults to declining (`None`), the evaluator falls back to the
+/// scan on `None` with the work budget it spent on the attempt refunded, and
+/// an answer must agree exactly with that scan. The `conformance` feature's
+/// kit checks this contract for an implementation.
+///
+/// A navigator is used by one thread per evaluation; it need not be `Sync`.
+/// [`FunctionTable`](crate::FunctionTable) built with
+/// [`new_sync`](crate::FunctionTable::new_sync) is `Send + Sync`, so it can be
+/// shared across threads; [`Namespaces`](crate::Namespaces),
+/// [`NodeSetPool`](crate::NodeSetPool) and [`Context`](crate::Context) are
+/// per-thread objects for one set of evaluations.
 pub trait Navigator {
     type Node: Clone + Eq + Hash + std::fmt::Debug;
     /// Reject stale or foreign handles before infallible kind/order operations.
@@ -112,6 +139,44 @@ pub trait Navigator {
         _parent: &Self::Node,
         _name: &ExpandedName,
     ) -> Option<Vec<Self::Node>> {
+        None
+    }
+    /// The element descendants of `node` whose expanded name is `name`, in
+    /// document order, without duplicates, or `None` if the adapter cannot
+    /// answer without a scan. Does not include `node` itself.
+    ///
+    /// The evaluator asks this first for a `descendant::name` or
+    /// `descendant-or-self::name` step, and for the `//name` spelling
+    /// (`descendant-or-self::node()/child::name` with no predicates on the
+    /// `child::` step). It falls back to a descendant scan plus
+    /// [`name_matches`](Self::name_matches) on `None`. `Some` must contain
+    /// exactly the element descendants a scan would select, in document
+    /// order. The default is `None`.
+    fn descendants_named(
+        &self,
+        _node: &Self::Node,
+        _name: &ExpandedName,
+    ) -> Option<Vec<Self::Node>> {
+        None
+    }
+    /// Number of element children of `parent` named `name`, or `None` to
+    /// decline. Must equal `children_named(parent, name).len()` when both
+    /// answer.
+    ///
+    /// The evaluator asks this for `count(name)` (a relative, single
+    /// `child::name` step without predicates). The default is `None`.
+    fn count_children_named(&self, _parent: &Self::Node, _name: &ExpandedName) -> Option<usize> {
+        None
+    }
+    /// Whether `parent` has at least one element child named `name`, or
+    /// `None` to decline. Must equal `!children_named(parent, name).is_empty()`
+    /// when both answer.
+    ///
+    /// The evaluator asks this for a relative, single `child::name` step
+    /// without predicates in boolean position: an operand of `and` / `or`, the
+    /// argument of `boolean()` or `not()`, or a predicate `[name]`. The
+    /// default is `None`.
+    fn exists_child_named(&self, _parent: &Self::Node, _name: &ExpandedName) -> Option<bool> {
         None
     }
     /// Point lookup of the child element `name` of `parent` whose key children

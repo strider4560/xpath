@@ -1,11 +1,14 @@
 use crate::{
-    ast::{BinaryOp, Expr, NodeTest, QName, Step},
+    ast::{key_pair, single_child_name, BinaryOp, Expr, NodeTest, QName, Step},
     functions,
     value::string_to_number,
     Axis, Context, Error, ErrorKind, ExpandedName, FunctionContext, Namespaces, Navigator,
     NodeKind, Result, Value,
 };
-use std::{cmp::Ordering, collections::HashSet, rc::Rc};
+use std::{
+    cmp::Ordering, collections::HashSet, rc::Rc, sync::atomic::Ordering as AtomicOrdering,
+    time::Instant,
+};
 
 struct Focus<N> {
     node: N,
@@ -35,11 +38,19 @@ fn retain_nodes<T>(
 }
 
 pub(crate) fn evaluate<N: Navigator>(expr: &Expr, ctx: &Context<'_, N>) -> Result<Value<N::Node>> {
-    ctx.navigator.validate_node(&ctx.node)?;
     let mut evaluator = Evaluator {
         ctx,
         remaining: ctx.limits.max_operations,
+        interval: 0,
+        next_check: 0,
     };
+    // R10: a passed deadline or a set flag ends evaluation before any
+    // navigation; the check also arms the next one.
+    if ctx.cancel.is_some() || ctx.limits.deadline.is_some() {
+        evaluator.interval = ctx.limits.check_interval();
+        evaluator.checkpoint()?;
+    }
+    ctx.navigator.validate_node(&ctx.node)?;
     evaluator.expr(
         expr,
         &Focus {
@@ -54,6 +65,11 @@ pub(crate) fn evaluate<N: Navigator>(expr: &Expr, ctx: &Context<'_, N>) -> Resul
 struct Evaluator<'a, 'b, N: Navigator> {
     ctx: &'a Context<'b, N>,
     remaining: usize,
+    /// R10: work units between cancellation / deadline checks, and the
+    /// `remaining` value below which the next check runs. It stays 0, so no
+    /// check ever runs, when neither a flag nor a deadline is configured.
+    interval: usize,
+    next_check: usize,
 }
 
 impl<'a, N: Navigator> Evaluator<'a, '_, N> {
@@ -62,6 +78,37 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
             .remaining
             .checked_sub(amount)
             .ok_or_else(|| Error::new(ErrorKind::Limit, "XPath evaluation work limit exceeded"))?;
+        if self.remaining < self.next_check {
+            return self.checkpoint();
+        }
+        Ok(())
+    }
+
+    /// R10: read the cancellation flag and the deadline, and arm the next
+    /// check `interval` units further on. (A refunded attempt raises
+    /// `remaining` again, which only delays that check.)
+    #[cold]
+    #[inline(never)]
+    fn checkpoint(&mut self) -> Result<()> {
+        self.next_check = self.remaining.saturating_sub(self.interval - 1);
+        if self
+            .ctx
+            .cancel
+            .is_some_and(|flag| flag.load(AtomicOrdering::Relaxed))
+        {
+            return Err(Error::new(ErrorKind::Limit, "XPath evaluation cancelled"));
+        }
+        if self
+            .ctx
+            .limits
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(Error::new(
+                ErrorKind::Limit,
+                "XPath evaluation deadline exceeded",
+            ));
+        }
         Ok(())
     }
 
@@ -222,9 +269,30 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
             }
             Expr::Function(q, arguments) => {
                 let name = self.name(q)?;
+                let core = name.namespace_uri.is_empty();
+                // R9: count(name) may be answered by the navigator; boolean()
+                // and not() take their argument in boolean position.
+                let mut condition = false;
+                if let ([argument], true) = (arguments.as_slice(), core) {
+                    match name.local_name.as_str() {
+                        "count" => {
+                            if let Some(count) =
+                                self.count_children_named(argument, focus, depth + 1)?
+                            {
+                                return Ok(count);
+                            }
+                        }
+                        "boolean" | "not" => condition = true,
+                        _ => {}
+                    }
+                }
                 let mut args = Vec::with_capacity(arguments.len());
                 for argument in arguments {
-                    args.push(self.expr(argument, focus, depth + 1)?);
+                    args.push(if condition {
+                        self.condition(argument, focus, depth + 1)?
+                    } else {
+                        self.expr(argument, focus, depth + 1)?
+                    });
                 }
                 let call_context = FunctionContext {
                     navigator: self.ctx.navigator,
@@ -233,7 +301,7 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
                     position: focus.position,
                     size: focus.size,
                 };
-                let core = if name.namespace_uri.is_empty() {
+                let core = if core {
                     functions::call(&name.local_name, &args, &call_context, &mut self.remaining)
                 } else {
                     None
@@ -262,7 +330,13 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
                 Ok(Value::Number(-number?))
             }
             Expr::Binary(operator, left, right) => {
-                let a = self.expr(left, focus, depth + 1)?;
+                // R9: the operands of `and` / `or` are in boolean position.
+                let logical = matches!(operator, BinaryOp::Or | BinaryOp::And);
+                let a = if logical {
+                    self.condition(left, focus, depth + 1)?
+                } else {
+                    self.expr(left, focus, depth + 1)?
+                };
                 if *operator == BinaryOp::Or && a.to_boolean() {
                     self.give_value(a);
                     return Ok(Value::Boolean(true));
@@ -271,7 +345,11 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
                     self.give_value(a);
                     return Ok(Value::Boolean(false));
                 }
-                let b = self.expr(right, focus, depth + 1)?;
+                let b = if logical {
+                    self.condition(right, focus, depth + 1)?
+                } else {
+                    self.expr(right, focus, depth + 1)?
+                };
                 self.binary(*operator, a, b)
             }
             Expr::Path {
@@ -291,8 +369,21 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
                     nodes.push(start);
                     nodes
                 };
-                for step in steps {
-                    nodes = self.step(nodes, step, depth + 1)?;
+                let mut index = 0;
+                while index < steps.len() {
+                    // R8: `//name` is `descendant-or-self::node()/child::name`.
+                    if let Some(next) = steps
+                        .get(index + 1)
+                        .filter(|next| slash_slash(&steps[index], next))
+                    {
+                        if let Some(found) = self.slash_slash(&nodes, &next.test)? {
+                            self.give(std::mem::replace(&mut nodes, found));
+                            index += 2;
+                            continue;
+                        }
+                    }
+                    nodes = self.step(nodes, &steps[index], depth + 1)?;
+                    index += 1;
                 }
                 Ok(Value::Nodes(nodes))
             }
@@ -486,7 +577,8 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
     ) -> Result<Vec<N::Node>> {
         for predicate in predicates {
             retain_nodes(&mut nodes, |node, position, size| {
-                let value = self.expr(
+                // R9: a bare `[name]` predicate is in boolean position.
+                let value = self.condition(
                     predicate,
                     &Focus {
                         node: node.clone(),
@@ -530,6 +622,9 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
             }
             let matching = match (&test, step.axis) {
                 (ResolvedTest::Name(name), Axis::Child) => self.children_named(&node, name)?,
+                (ResolvedTest::Name(name), Axis::Descendant | Axis::DescendantOrSelf) => {
+                    self.descendants_named(&node, name, step.axis == Axis::DescendantOrSelf)?
+                }
                 _ => None,
             };
             let matching = match matching {
@@ -553,22 +648,18 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
     /// R2: the step's name and the length of the leading run of `[k = e]`
     /// predicates of a `child::name` step that a keyed lookup can answer.
     ///
-    /// Each predicate must be `=` between a one-step relative `child::k` name
-    /// test without predicates and a context-independent expression (either
-    /// operand order), see [`key_pair`]. The first predicate of any other
-    /// shape, including every position-dependent one, ends the run, as does a
-    /// key with an unbound prefix (ordinary evaluation then reports it exactly
-    /// when it would have before). `None` if the run is empty. Allocates
-    /// nothing: the run is re-read from the predicates by `child_by_key`.
+    /// The run is [`Step::key_run`] (R7, the public recognizer: each
+    /// predicate is `=` between a one-step relative `child::k` name test
+    /// without predicates and a context-independent expression, either operand
+    /// order), additionally ended by a key with an unbound prefix (ordinary
+    /// evaluation then reports it exactly when it would have before). `None`
+    /// if the run is empty. Allocates nothing: the run is re-read from the
+    /// predicates by `child_by_key`.
     fn key_run(&self, step: &Step, test: &ResolvedTest) -> Option<(Rc<ExpandedName>, usize)> {
         let ResolvedTest::Name(name) = test else {
             return None;
         };
-        if step.axis != Axis::Child {
-            return None;
-        }
-        let run = step
-            .predicates
+        let run = step.predicates[..step.key_run()]
             .iter()
             .take_while(|predicate| {
                 key_pair(predicate).is_some_and(|(key, _)| {
@@ -665,6 +756,153 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
         // Element children only, as the principal-kind test of a scan requires.
         children.retain(|child| nav.kind(child) == NodeKind::Element);
         Ok(Some(children))
+    }
+
+    /// R8: ask the navigator for the element descendants named `name`,
+    /// adding `node` itself first for `descendant-or-self` when it matches.
+    /// `None` means the caller scans the axis instead. Only root and element
+    /// nodes are asked; other nodes have no descendants to scan.
+    fn descendants_named(
+        &mut self,
+        node: &N::Node,
+        name: &ExpandedName,
+        include_self: bool,
+    ) -> Result<Option<Vec<N::Node>>> {
+        let nav = self.ctx.navigator;
+        let kind = nav.kind(node);
+        if !matches!(kind, NodeKind::Root | NodeKind::Element) {
+            return Ok(None);
+        }
+        let Some(mut found) = nav.descendants_named(node, name) else {
+            return Ok(None);
+        };
+        self.spend(found.len())?;
+        for descendant in &found {
+            nav.validate_node(descendant)?;
+        }
+        found.retain(|descendant| nav.kind(descendant) == NodeKind::Element);
+        if include_self && kind == NodeKind::Element && nav.name_matches(node, name) {
+            found.insert(0, node.clone());
+        }
+        Ok(Some(found))
+    }
+
+    /// R8: `//name` (a predicate-free `descendant-or-self::node()` step then a
+    /// predicate-free `child::name` step) over `nodes`, answered by
+    /// `descendants_named` for each root or element input. `None` if the
+    /// test is not a resolvable name or the navigator declines for any input:
+    /// the caller then evaluates both steps normally, with the work budget
+    /// spent on the attempt refunded.
+    fn slash_slash(&mut self, nodes: &[N::Node], test: &NodeTest) -> Result<Option<Vec<N::Node>>> {
+        let NodeTest::Name(name) = test else {
+            return Ok(None);
+        };
+        // An unbound prefix is reported by ordinary evaluation.
+        let Ok(name) = self.test_name(name, Axis::Child) else {
+            return Ok(None);
+        };
+        let nav = self.ctx.navigator;
+        let budget = self.remaining;
+        let mut result = self.take();
+        for node in nodes {
+            self.spend(1)?;
+            // A node other than a root or element is its own only
+            // descendant-or-self, and it has no children.
+            if !matches!(nav.kind(node), NodeKind::Root | NodeKind::Element) {
+                continue;
+            }
+            let Some(mut found) = self.descendants_named(node, &name, false)? else {
+                self.give(result);
+                self.remaining = budget;
+                return Ok(None);
+            };
+            result.append(&mut found);
+            self.give(found);
+        }
+        Ok(Some(self.normalize(result)))
+    }
+
+    /// R9: `count(name)` at a root or element focus, answered by
+    /// `count_children_named`. `None` means evaluate the call normally;
+    /// nothing has been spent then. `depth` is the argument's depth.
+    fn count_children_named(
+        &mut self,
+        argument: &Expr,
+        focus: &Focus<N::Node>,
+        depth: usize,
+    ) -> Result<Option<Value<N::Node>>> {
+        let Some(name) = self.pushdown_name(argument, focus, depth) else {
+            return Ok(None);
+        };
+        let Some(count) = self.ctx.navigator.count_children_named(&focus.node, &name) else {
+            return Ok(None);
+        };
+        self.spend(1)?;
+        Ok(Some(Value::Number(count as f64)))
+    }
+
+    /// Evaluate `expr` in boolean position. R9: a relative single-step
+    /// `child::name` path without predicates at a root or element focus is
+    /// answered by `exists_child_named` as a boolean; otherwise, or when the
+    /// navigator declines, `expr` is evaluated normally. The caller converts
+    /// the value to a boolean, so both answers have the same effect.
+    #[inline]
+    fn condition(
+        &mut self,
+        expr: &Expr,
+        focus: &Focus<N::Node>,
+        depth: usize,
+    ) -> Result<Value<N::Node>> {
+        // Only a relative path can be the pushed shape; keep the common case
+        // (comparisons, literals, calls) free of the full check.
+        if matches!(
+            expr,
+            Expr::Path {
+                base: None,
+                absolute: false,
+                ..
+            }
+        ) {
+            if let Some(found) = self.exists_child_named(expr, focus, depth) {
+                self.spend(1)?;
+                return Ok(Value::Boolean(found));
+            }
+        }
+        self.expr(expr, focus, depth)
+    }
+
+    /// R9: `exists_child_named` for `expr` if it has the pushed shape and the
+    /// navigator answers.
+    fn exists_child_named(
+        &self,
+        expr: &Expr,
+        focus: &Focus<N::Node>,
+        depth: usize,
+    ) -> Option<bool> {
+        let name = self.pushdown_name(expr, focus, depth)?;
+        self.ctx.navigator.exists_child_named(&focus.node, &name)
+    }
+
+    /// R9: the resolved name of `expr` if it is a relative, single-step
+    /// `child::name` path without predicates that ordinary evaluation at
+    /// `depth` would run (within the depth limit) at a root or element focus.
+    /// An unbound prefix is left for ordinary evaluation to report.
+    fn pushdown_name(
+        &self,
+        expr: &Expr,
+        focus: &Focus<N::Node>,
+        depth: usize,
+    ) -> Option<Rc<ExpandedName>> {
+        let name = single_child_name(expr)?;
+        if depth >= self.ctx.limits.max_depth
+            || !matches!(
+                self.ctx.navigator.kind(&focus.node),
+                NodeKind::Root | NodeKind::Element
+            )
+        {
+            return None;
+        }
+        self.test_name(name, Axis::Child).ok()
     }
 
     /// The expanded name of a name test on `axis`: unprefixed element tests
@@ -882,54 +1120,15 @@ impl<'a, N: Navigator> Evaluator<'a, '_, N> {
     }
 }
 
-/// `k` or `child::k`: a one-step relative child name test without predicates.
-fn key_child(expr: &Expr) -> Option<&QName> {
-    match expr {
-        Expr::Path {
-            base: None,
-            absolute: false,
-            steps,
-        } => match steps.as_slice() {
-            [Step {
-                axis: Axis::Child,
-                test: NodeTest::Name(name),
-                predicates,
-            }] if predicates.is_empty() => Some(name),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-/// A string or number literal, a variable, `current()`, or a path rooted at
-/// `current()`. `current()` is assumed to be the YANG function returning the
-/// context's initial node, so none of these depend on the predicate's focus.
-fn context_independent(expr: &Expr) -> bool {
-    fn is_current(expr: &Expr) -> bool {
-        matches!(expr, Expr::Function(name, args)
-            if name.prefix.is_none() && name.local == "current" && args.is_empty())
-    }
-    match expr {
-        Expr::String(_) | Expr::Number(_) | Expr::Variable(_) => true,
-        Expr::Path {
-            base: Some(base), ..
-        } => is_current(base),
-        other => is_current(other),
-    }
-}
-
-/// A predicate a keyed lookup can answer: `k = e` or `e = k`, with `k` a
-/// one-step relative child name test and `e` context-independent, as
-/// (key name, right-hand side).
-fn key_pair(predicate: &Expr) -> Option<(&QName, &Expr)> {
-    let Expr::Binary(BinaryOp::Eq, left, right) = predicate else {
-        return None;
-    };
-    match (key_child(left), key_child(right)) {
-        (Some(key), _) if context_independent(right) => Some((key, right)),
-        (_, Some(key)) if context_independent(left) => Some((key, left)),
-        _ => None,
-    }
+/// R8: a predicate-free `descendant-or-self::node()` step followed by a
+/// predicate-free `child::` name step, the parser's spelling of `//name`.
+fn slash_slash(step: &Step, next: &Step) -> bool {
+    step.axis == Axis::DescendantOrSelf
+        && step.test == NodeTest::Node
+        && step.predicates.is_empty()
+        && next.axis == Axis::Child
+        && matches!(next.test, NodeTest::Name(_))
+        && next.predicates.is_empty()
 }
 
 const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";

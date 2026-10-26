@@ -14,6 +14,16 @@ cargo build --manifest-path tools/differential/Cargo.toml --target-dir target/di
 python3 tools/differential/check.py target/differential/debug/xpath1-differential-client
 ```
 
+To run the same comparison with every storage hook answered (the fixture
+wrapped in `xpath1::conformance::ScanHooks`), set `XPATH1_HOOKS=1`:
+
+```sh
+XPATH1_HOOKS=1 python3 tools/differential/check.py target/differential/debug/xpath1-differential-client
+```
+
+Both modes must report no differences, and their raw client outputs are
+byte-identical.
+
 The generator uses Python `random.Random(7)` and a fixed fixture, exercising
 eleven axes, several node tests, sequential predicates, and count/name/string
 conversion. Initial contexts are elements. The script exits unsuccessfully for

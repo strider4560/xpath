@@ -186,6 +186,7 @@ fn limits_and_context_validation() {
     let ctx = Context::new(&Tree, 0).with_limits(Limits {
         max_operations: 2,
         max_depth: 10,
+        ..Limits::default()
     });
     assert_eq!(
         XPath::compile("//n")
@@ -199,6 +200,7 @@ fn limits_and_context_validation() {
     let ctx = Context::new(&Tree, 5).with_limits(Limits {
         max_operations: 2,
         max_depth: 10,
+        ..Limits::default()
     });
     assert_eq!(
         XPath::compile("lang('en')")

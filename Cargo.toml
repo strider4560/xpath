@@ -1,6 +1,6 @@
 [package]
 name = "xpath1"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.85"
 description = "XPath 1.0 over application-defined trees, with a Jaxen conformance corpus"
@@ -11,6 +11,9 @@ exclude = [".superpowers", "target"]
 [features]
 default = ["xml"]
 xml = ["dep:roxmltree"]
+# The Navigator conformance kit (`xpath1::conformance`): the Jaxen corpus and
+# a hook-consistency matrix, parameterized over a host navigator.
+conformance = ["xml"]
 
 [dependencies]
 roxmltree = { version = "0.20", optional = true }
@@ -26,6 +29,14 @@ harness = false
 [[test]]
 name = "jaxen"
 required-features = ["xml"]
+
+[[test]]
+name = "conformance"
+required-features = ["conformance"]
+
+[[test]]
+name = "pushdown"
+required-features = ["conformance"]
 
 [[example]]
 name = "xml"

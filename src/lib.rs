@@ -6,6 +6,8 @@
 #![forbid(unsafe_code)]
 
 pub mod ast;
+#[cfg(feature = "conformance")]
+pub mod conformance;
 mod context;
 mod error;
 mod eval;
@@ -18,7 +20,10 @@ mod value;
 #[cfg(feature = "xml")]
 pub mod xml;
 
-pub use context::{Context, FunctionContext, FunctionTable, Limits};
+pub use context::{
+    Context, FunctionContext, FunctionTable, Limits, LocalFunction, SyncFunction,
+    SyncFunctionTable, TableFunction,
+};
 pub use error::{Error, ErrorKind, Result};
 pub use model::{Axis, ExpandedName, Navigator, NodeKind};
 pub use namespaces::Namespaces;

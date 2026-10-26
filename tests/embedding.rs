@@ -520,3 +520,156 @@ fn function_table_is_shared_and_shadowed() {
         xpath1::ErrorKind::Function
     );
 }
+
+// R7: the public key-run analysis is the evaluator's: a step reaches
+// child_by_key exactly when `Step::key_run` is non-zero.
+#[test]
+fn key_run_analysis_matches_the_evaluator() {
+    use counting::Rows;
+    use xpath1::ast::{context_independent, key_pair, Expr, NodeTest};
+    use xpath1::Axis;
+    for (expr, run) in [
+        ("a/b[c = 'x']", 1),
+        ("a/b['x' = c]", 1),
+        ("a/child::b[child::c = 'x']", 1),
+        ("a/b[c = 'x'][d = 'd1']", 2),
+        ("a/b[c = 'x'][1]", 1),
+        ("a/b[c = $k][d = current()]", 2),
+        ("a/b[c = current()/../c]", 1),
+        ("a/b[1][c = 'x']", 0),
+        ("a/b[position() = 2]", 0),
+        ("a/b[c != 'x']", 0),
+        ("a/b[c/text() = 'x']", 0),
+        ("a/b[c = d]", 0),
+        ("a/b[c = string(.)]", 0),
+        ("a/b[./c = 'x']", 0),
+        ("a/b[c[1] = 'x']", 0),
+        ("a/b[@c = 'x']", 0),
+        ("a/descendant::b[c = 'x']", 0),
+        ("a/*[c = 'x']", 0),
+    ] {
+        let xpath = XPath::compile(expr).unwrap();
+        let Expr::Path { steps, .. } = xpath.ast() else {
+            panic!("{expr}");
+        };
+        let step = steps.last().unwrap();
+        assert_eq!(step.key_run(), run, "{expr}");
+        let nav = Rows::new(true, false);
+        let current = |f: &xpath1::FunctionContext<'_, Rows>, _: &[Value<usize>]| {
+            Ok(Value::Nodes(vec![*f.initial_node]))
+        };
+        let ctx = Context::new(&nav, 0)
+            .with_variable("k", Value::String("x".into()))
+            .with_function(xpath1::ExpandedName::local("current"), current);
+        xpath.evaluate(&ctx).unwrap();
+        assert_eq!(nav.calls.child_by_key.get() > 0, run > 0, "{expr}");
+        // The run is the leading key pairs, ended by the first other predicate.
+        assert!(step.predicates[..run].iter().all(|p| key_pair(p).is_some()));
+        let keyable = step.axis == Axis::Child && matches!(step.test, NodeTest::Name(_));
+        if let Some(next) = step.predicates.get(run).filter(|_| keyable) {
+            assert!(key_pair(next).is_none(), "{expr}");
+        }
+    }
+    let rhs = |source: &str| XPath::compile(source).unwrap().ast().clone();
+    for (source, independent) in [
+        ("'x'", true),
+        ("7", true),
+        ("$v", true),
+        ("current()", true),
+        ("current()/../c", true),
+        ("c", false),
+        ("string(.)", false),
+        ("current(1)", false),
+        ("p:current()", false),
+        ("concat('a', 'b')", false),
+    ] {
+        assert_eq!(context_independent(&rhs(source)), independent, "{source}");
+    }
+    let pair = rhs("k = 'v'");
+    let (key, value) = key_pair(&pair).unwrap();
+    assert_eq!(key.local, "k");
+    assert_eq!(*value, Expr::String("v".into()));
+}
+
+// R12: a `new_sync` table is Send + Sync whatever the navigator, and can be
+// shared by threads that each evaluate with their own context.
+#[test]
+fn sync_function_table_is_shared_across_threads() {
+    use std::rc::Rc;
+    use xpath1::{ExpandedName, FunctionTable, Navigator, SyncFunctionTable};
+    fn send_sync<T: Send + Sync>() {}
+    send_sync::<SyncFunctionTable<Document>>();
+    // Even for a navigator whose handles are not Send.
+    struct RcTree;
+    impl Navigator for RcTree {
+        type Node = Rc<usize>;
+        fn kind(&self, _: &Rc<usize>) -> xpath1::NodeKind {
+            xpath1::NodeKind::Root
+        }
+        fn parent(&self, _: &Rc<usize>) -> xpath1::Result<Option<Rc<usize>>> {
+            Ok(None)
+        }
+        fn children<'a>(
+            &'a self,
+            _: &'a Rc<usize>,
+        ) -> impl Iterator<Item = xpath1::Result<Rc<usize>>> + 'a {
+            std::iter::empty()
+        }
+        fn name(&self, _: &Rc<usize>) -> xpath1::Result<Option<ExpandedName>> {
+            Ok(None)
+        }
+        fn string_value(&self, _: &Rc<usize>) -> xpath1::Result<String> {
+            Ok(String::new())
+        }
+        fn compare_document_order(&self, a: &Rc<usize>, b: &Rc<usize>) -> std::cmp::Ordering {
+            a.cmp(b)
+        }
+    }
+    send_sync::<SyncFunctionTable<RcTree>>();
+
+    let mut table = FunctionTable::new_sync();
+    let offset = std::sync::Arc::new(10.0);
+    table.insert(ExpandedName::local("plus"), move |_, args| {
+        Ok(Value::Number(
+            *offset + args[0].to_number(&Document::parse("<a/>")?)?,
+        ))
+    });
+    let table = &table;
+    let results: Vec<Value<_>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                scope.spawn(move || {
+                    let doc = Document::parse(&format!("<r>{}</r>", "<x/>".repeat(i))).unwrap();
+                    let ctx = Context::new(&doc, doc.root()).with_functions(table);
+                    let value = XPath::compile("plus(count(/r/x))")
+                        .unwrap()
+                        .evaluate(&ctx)
+                        .unwrap();
+                    match value {
+                        Value::Number(n) => Value::<()>::Number(n),
+                        _ => unreachable!(),
+                    }
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_eq!(
+        results,
+        (0..4)
+            .map(|i| Value::Number(10.0 + i as f64))
+            .collect::<Vec<_>>()
+    );
+    // A per-thread table still accepts closures that are not Send.
+    let mut local: FunctionTable<Document> = FunctionTable::new();
+    let shared = Rc::new(1.0);
+    local.insert(ExpandedName::local("one"), move |_, _| {
+        Ok(Value::Number(*shared))
+    });
+    let doc = Document::parse("<r/>").unwrap();
+    let ctx = Context::new(&doc, doc.root()).with_functions(&local);
+    assert_eq!(
+        XPath::compile("one()").unwrap().evaluate(&ctx).unwrap(),
+        Value::Number(1.0)
+    );
+}

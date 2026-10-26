@@ -2,7 +2,7 @@ mod support;
 
 use criterion::{BenchmarkId, Criterion};
 use std::{hint::black_box, time::Duration};
-use support::{Counted, Tree, NS, SELECT, WHEN};
+use support::{Counted, Indexed, Tree, NS, SELECT, WHEN};
 use xpath1::{Context, Value, XPath};
 
 const SELECTORS: [(&str, &str); 5] = [
@@ -223,6 +223,44 @@ fn pool(c: &mut Criterion) {
     group.finish();
 }
 
+/// R8 and R9: `count(child::x)` over 1000-entry lists and `//x` over the
+/// schema-shaped fixture, with the storage hooks answering and declining.
+fn pushdown(c: &mut Criterion) {
+    let tree = Tree::interfaces(1000);
+    let mut group = c.benchmark_group("pushdown");
+    for (name, source, node, expected) in [
+        ("count", "count(child::if:interface)", 1, 1000.0),
+        ("descendants", "count(//if:mtu)", 0, 1000.0),
+    ] {
+        let expression = XPath::compile(source).unwrap();
+        for (line, hooks) in [("without", false), ("with", true)] {
+            let nav = Indexed::new(&tree, hooks);
+            let context = Context::new(&nav, node).with_namespace("if", NS);
+            assert_eq!(
+                expression.evaluate(&context).unwrap(),
+                Value::Number(expected)
+            );
+            group.bench_function(BenchmarkId::new(name, line), |b| {
+                b.iter(|| {
+                    black_box(&expression)
+                        .evaluate(black_box(&context))
+                        .unwrap()
+                })
+            });
+        }
+    }
+    let expression = XPath::compile("//if:mtu").unwrap();
+    for (line, hooks) in [("without", false), ("with", true)] {
+        let nav = Indexed::new(&tree, hooks);
+        let context = Context::new(&nav, 0).with_namespace("if", NS);
+        assert_eq!(expression.select(&context).unwrap().len(), 1000);
+        group.bench_function(BenchmarkId::new("select_descendants", line), |b| {
+            b.iter(|| black_box(&expression).select(black_box(&context)).unwrap())
+        });
+    }
+    group.finish();
+}
+
 fn counts() {
     println!("case,name_calls,string_calls,order_calls,child_nodes");
     let tree = Tree::interfaces(1000);
@@ -273,6 +311,7 @@ fn main() {
     compilation(&mut criterion);
     application_tree(&mut criterion);
     comparisons(&mut criterion);
+    pushdown(&mut criterion);
     #[cfg(feature = "xml")]
     xml(&mut criterion);
     #[cfg(feature = "xml")]
